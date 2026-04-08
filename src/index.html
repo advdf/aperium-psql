@@ -10,7 +10,6 @@
   <script src="../node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
   <script src="../node_modules/@xterm/addon-web-links/lib/addon-web-links.js"></script>
   <script>
-    // Make xterm globals available before the bundle loads
     window._Terminal = Terminal;
     window._FitAddon = FitAddon;
     window._WebLinksAddon = WebLinksAddon;
@@ -28,6 +27,11 @@
 
   <!-- Main area -->
   <main id="main">
+    <!-- Tab bar -->
+    <div id="tab-bar" class="hidden">
+      <div id="tab-list"></div>
+    </div>
+
     <!-- Welcome screen -->
     <div id="welcome">
       <div class="welcome-content">

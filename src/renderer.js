@@ -5,18 +5,21 @@ const XTerminal = window._Terminal;
 const XFitAddon = window._FitAddon.FitAddon;
 const XWebLinksAddon = window._WebLinksAddon.WebLinksAddon;
 
-// State
+// ---- Tab state ----
+const tabs = new Map(); // tabId -> tab state
+let activeTabId = null;
+
+// Each tab: { id, connId, connection, terminal, fitAddon, editorView, editorContent, resultsHtml, resultsStatus, lastResults, terminalEl }
+
+// ---- Connections ----
 let connections = [];
-let activeSessionId = null;
-let activeConnection = null;
-let terminal = null;
-let fitAddon = null;
-let editorView = null;
 
 // DOM
 const connectionList = document.getElementById('connection-list');
 const welcome = document.getElementById('welcome');
 const session = document.getElementById('session');
+const tabBar = document.getElementById('tab-bar');
+const tabList = document.getElementById('tab-list');
 const editorContainer = document.getElementById('editor-container');
 const terminalContainer = document.getElementById('terminal-container');
 const connectionInfo = document.getElementById('connection-info');
@@ -36,37 +39,42 @@ const dbSelector = document.getElementById('db-selector');
 const btnCopyCsv = document.getElementById('btn-copy-csv');
 const btnCopyJson = document.getElementById('btn-copy-json');
 
-// Last query results for copy
-let lastResults = null;
-
-// Init
+// ---- Init ----
 async function init() {
   connections = await window.api.listConnections();
   renderConnections();
   setupResizeHandles();
 
   window.api.onPtyData(({ id, data }) => {
-    if (id === activeSessionId && terminal) {
-      terminal.write(data);
+    // Route data to the correct tab's terminal
+    for (const [, tab] of tabs) {
+      if (tab.connId === id && tab.terminal) {
+        tab.terminal.write(data);
+      }
     }
   });
 
   window.api.onPtyExit(({ id, exitCode }) => {
-    if (id === activeSessionId && terminal) {
-      terminal.write(`\r\n\x1b[33m[psql exited with code ${exitCode}]\x1b[0m\r\n`);
-      updateConnectionStatus(id, false);
+    for (const [, tab] of tabs) {
+      if (tab.connId === id && tab.terminal) {
+        tab.terminal.write(`\r\n\x1b[33m[psql exited with code ${exitCode}]\x1b[0m\r\n`);
+        updateConnectionStatus(id, false);
+      }
     }
   });
 }
 
-// Connections
+// ---- Active tab helpers ----
+function getActiveTab() {
+  return activeTabId ? tabs.get(activeTabId) : null;
+}
+
+// ---- Connections rendering ----
 const collapsedGroups = new Set();
 
 function renderConnections() {
   connectionList.innerHTML = '';
-
-  // Group connections
-  const groups = new Map(); // group name -> connections[]
+  const groups = new Map();
   const ungrouped = [];
 
   connections.forEach((conn) => {
@@ -79,10 +87,8 @@ function renderConnections() {
     }
   });
 
-  // Render groups
   for (const [groupName, conns] of groups) {
     const isCollapsed = collapsedGroups.has(groupName);
-
     const groupEl = document.createElement('div');
     groupEl.className = 'conn-group';
 
@@ -94,11 +100,8 @@ function renderConnections() {
       <span class="group-count">${conns.length}</span>
     `;
     header.addEventListener('click', () => {
-      if (collapsedGroups.has(groupName)) {
-        collapsedGroups.delete(groupName);
-      } else {
-        collapsedGroups.add(groupName);
-      }
+      if (collapsedGroups.has(groupName)) collapsedGroups.delete(groupName);
+      else collapsedGroups.add(groupName);
       renderConnections();
     });
 
@@ -111,18 +114,22 @@ function renderConnections() {
     connectionList.appendChild(groupEl);
   }
 
-  // Render ungrouped
   ungrouped.forEach((conn) => connectionList.appendChild(createConnItem(conn)));
-
-  // Update datalist for group suggestions
   updateGroupSuggestions();
 }
 
 function createConnItem(conn) {
+  // Check if any tab is connected to this connection
+  let isConnected = false;
+  for (const [, tab] of tabs) {
+    if (tab.connId === conn.id) { isConnected = true; break; }
+  }
+
   const el = document.createElement('div');
-  el.className = 'conn-item' + (conn.id === activeSessionId ? ' active' : '');
+  const isActiveConn = getActiveTab()?.connId === conn.id;
+  el.className = 'conn-item' + (isActiveConn ? ' active' : '');
   el.innerHTML = `
-    <div class="conn-status ${conn._connected ? 'connected' : ''}"></div>
+    <div class="conn-status ${isConnected ? 'connected' : ''}"></div>
     <span class="conn-name">${escapeHtml(conn.name)}</span>
     <div class="conn-item-actions">
       <button class="edit" title="Edit">&#9998;</button>
@@ -132,7 +139,7 @@ function createConnItem(conn) {
   el.addEventListener('click', (e) => {
     if (e.target.closest('.edit')) openEditDialog(conn);
     else if (e.target.closest('.delete')) deleteConnection(conn.id);
-    else connectTo(conn);
+    else openTab(conn);
   });
   return el;
 }
@@ -174,11 +181,9 @@ function openEditDialog(conn) {
 async function deleteConnection(id) {
   connections = connections.filter((c) => c.id !== id);
   await window.api.saveConnections(connections.map(sanitizeConn));
-  if (activeSessionId === id) {
-    window.api.killPty(id);
-    activeSessionId = null;
-    activeConnection = null;
-    showWelcome();
+  // Close all tabs for this connection
+  for (const [tabId, tab] of tabs) {
+    if (tab.connId === id) closeTab(tabId);
   }
   renderConnections();
 }
@@ -188,111 +193,229 @@ function sanitizeConn(c) {
   return rest;
 }
 
-// Connect
-async function connectTo(conn) {
-  if (activeSessionId && activeSessionId !== conn.id) {
-    window.api.killPty(activeSessionId);
-    updateConnectionStatus(activeSessionId, false);
+// ---- Tab management ----
+function openTab(conn) {
+  // Check if a tab already exists for this connection
+  for (const [tabId, tab] of tabs) {
+    if (tab.connId === conn.id) {
+      switchTab(tabId);
+      return;
+    }
   }
 
-  activeSessionId = conn.id;
-  activeConnection = sanitizeConn(conn);
+  // Create new tab
+  const tabId = crypto.randomUUID();
+  const cleanConn = sanitizeConn(conn);
 
+  const tab = {
+    id: tabId,
+    connId: conn.id,
+    connName: conn.name,
+    connection: cleanConn,
+    terminal: null,
+    fitAddon: null,
+    editorView: null,
+    editorContent: '',
+    resultsHtml: '<div id="results-placeholder">Run a query to see results here.</div>',
+    resultsStatusText: '',
+    resultsStatusClass: '',
+    lastResults: null,
+  };
+
+  tabs.set(tabId, tab);
+  switchTab(tabId);
+  spawnTabTerminal(tab);
+  fetchDatabases(cleanConn);
+  fetchSchemaForTab(tab);
+}
+
+function switchTab(tabId) {
+  const prevTab = getActiveTab();
+
+  // Save current tab state
+  if (prevTab) {
+    // Save editor content
+    if (prevTab.editorView) {
+      prevTab.editorContent = prevTab.editorView.state.doc.toString();
+    }
+    // Save results
+    prevTab.resultsHtml = resultsContainer.innerHTML;
+    prevTab.resultsStatusText = resultsStatus.textContent;
+    prevTab.resultsStatusClass = resultsStatus.className;
+    // Detach terminal from DOM (don't dispose)
+    if (prevTab.terminal && prevTab.terminal.element) {
+      prevTab.terminalParent = prevTab.terminal.element.parentElement;
+    }
+    // Detach editor
+    if (prevTab.editorView) {
+      prevTab.editorView.dom.remove();
+    }
+  }
+
+  activeTabId = tabId;
+  const tab = tabs.get(tabId);
+
+  // Show session
   welcome.style.display = 'none';
   session.classList.remove('hidden');
+  tabBar.classList.remove('hidden');
 
-  // Set initial terminal height (remaining space after editor + results + toolbars + handles)
-  requestAnimationFrame(() => {
-    const termPanel = document.getElementById('terminal-panel');
-    const mainH = document.getElementById('main').getBoundingClientRect().height;
-    const editorH = editorPanel.getBoundingClientRect().height;
-    const resultsH = resultsPanel.getBoundingClientRect().height;
-    const handles = 8; // 2 resize handles x 4px
-    const remaining = mainH - editorH - resultsH - handles;
-    termPanel.style.height = Math.max(80, remaining) + 'px';
-  });
-
-  // Setup terminal
-  if (terminal) terminal.dispose();
-
-  terminal = new XTerminal({
-    fontFamily: "'JetBrains Mono', 'Fira Code', 'SF Mono', 'Menlo', monospace",
-    fontSize: 13,
-    lineHeight: 1.3,
-    theme: {
-      background: '#1e1e2e',
-      foreground: '#cdd6f4',
-      cursor: '#f5e0dc',
-      cursorAccent: '#1e1e2e',
-      selectionBackground: '#585b7066',
-      black: '#45475a',
-      red: '#f38ba8',
-      green: '#a6e3a1',
-      yellow: '#f9e2af',
-      blue: '#89b4fa',
-      magenta: '#cba6f7',
-      cyan: '#94e2d5',
-      white: '#bac2de',
-      brightBlack: '#585b70',
-      brightRed: '#f38ba8',
-      brightGreen: '#a6e3a1',
-      brightYellow: '#f9e2af',
-      brightBlue: '#89b4fa',
-      brightMagenta: '#cba6f7',
-      brightCyan: '#94e2d5',
-      brightWhite: '#a6adc8',
-    },
-  });
-
-  fitAddon = new XFitAddon();
-  terminal.loadAddon(fitAddon);
-  terminal.loadAddon(new XWebLinksAddon());
-
-  terminalContainer.innerHTML = '';
-  terminal.open(terminalContainer);
-
-  // Small delay to let the DOM settle before fitting
-  requestAnimationFrame(() => {
-    fitAddon.fit();
-  });
-
-  // Terminal is read-only — all input goes through the SQL editor
-  // Only allow Ctrl+C to cancel running queries
-  terminal.onData((data) => {
-    if (data === '\x03') { // Ctrl+C
-      window.api.writePty(conn.id, data);
-    }
-  });
-  terminal.onResize(({ cols, rows }) => window.api.resizePty(conn.id, cols, rows));
-
-  await window.api.spawnPty(conn.id, conn);
-  updateConnectionStatus(conn.id, true);
-  connectionInfo.textContent = `${conn.user || 'postgres'}@${conn.host || 'localhost'}:${conn.port || 5432}/${conn.database || 'postgres'}`;
-
-  // Init CodeMirror editor (once)
-  if (!editorView) {
-    editorView = createEditor(editorContainer, {
+  // Restore editor
+  editorContainer.innerHTML = '';
+  if (tab.editorView) {
+    editorContainer.appendChild(tab.editorView.dom);
+  } else {
+    tab.editorView = createEditor(editorContainer, {
       onRun: runQuery,
       onSendTerminal: sendToTerminal,
     });
+    if (tab.editorContent) {
+      tab.editorView.dispatch({ changes: { from: 0, insert: tab.editorContent } });
+    }
   }
 
+  // Restore results
+  resultsContainer.innerHTML = tab.resultsHtml;
+  resultsStatus.textContent = tab.resultsStatusText;
+  resultsStatus.className = tab.resultsStatusClass;
+  if (tab.lastResults) {
+    showCopyButtons();
+  } else {
+    hideCopyButtons();
+  }
+
+  // Restore terminal
+  terminalContainer.innerHTML = '';
+  if (tab.terminal) {
+    terminalContainer.appendChild(tab.terminal.element);
+    requestAnimationFrame(() => { if (tab.fitAddon) tab.fitAddon.fit(); });
+  }
+
+  // Update connection info
+  const c = tab.connection;
+  connectionInfo.textContent = `${c.user || 'postgres'}@${c.host || 'localhost'}:${c.port || 5432}/${c.database || 'postgres'}`;
+
+  // Set terminal height
+  requestAnimationFrame(() => {
+    const termPanel = document.getElementById('terminal-panel');
+    const mainH = document.getElementById('main').getBoundingClientRect().height;
+    const tabBarH = tabBar.getBoundingClientRect().height;
+    const editorH = editorPanel.getBoundingClientRect().height;
+    const resultsH = resultsPanel.getBoundingClientRect().height;
+    const handles = 8;
+    const remaining = mainH - tabBarH - editorH - resultsH - handles;
+    termPanel.style.height = Math.max(80, remaining) + 'px';
+    if (tab.fitAddon) tab.fitAddon.fit();
+  });
+
+  renderTabs();
   renderConnections();
-  editorView.focus();
-
-  // Fetch databases list and schema (async, non-blocking)
-  const cleanConn = sanitizeConn(conn);
-  fetchDatabases(cleanConn);
-  fetchSchema(cleanConn);
+  if (tab.editorView) tab.editorView.focus();
 }
 
-function showWelcome() {
-  welcome.style.display = 'flex';
-  session.classList.add('hidden');
-  if (terminal) { terminal.dispose(); terminal = null; }
+function closeTab(tabId) {
+  const tab = tabs.get(tabId);
+  if (!tab) return;
+
+  // Cleanup
+  if (tab.terminal) tab.terminal.dispose();
+  if (tab.editorView) tab.editorView.destroy();
+  window.api.killPty(tab.connId);
+
+  tabs.delete(tabId);
+
+  if (activeTabId === tabId) {
+    // Switch to another tab or show welcome
+    const remaining = [...tabs.keys()];
+    if (remaining.length > 0) {
+      switchTab(remaining[remaining.length - 1]);
+    } else {
+      activeTabId = null;
+      welcome.style.display = 'flex';
+      session.classList.add('hidden');
+      tabBar.classList.add('hidden');
+    }
+  }
+
+  renderTabs();
+  renderConnections();
 }
 
-// New connection dialog
+function renderTabs() {
+  tabList.innerHTML = '';
+  for (const [tabId, tab] of tabs) {
+    const el = document.createElement('div');
+    el.className = 'tab' + (tabId === activeTabId ? ' active' : '');
+    el.innerHTML = `
+      <span class="tab-name">${escapeHtml(tab.connName)}</span>
+      <span class="tab-close" title="Close tab">&times;</span>
+    `;
+    el.addEventListener('click', (e) => {
+      if (e.target.closest('.tab-close')) {
+        closeTab(tabId);
+      } else {
+        switchTab(tabId);
+      }
+    });
+    tabList.appendChild(el);
+  }
+}
+
+// ---- Terminal ----
+const XTERM_THEME = {
+  background: '#1e1e2e',
+  foreground: '#cdd6f4',
+  cursor: '#f5e0dc',
+  cursorAccent: '#1e1e2e',
+  selectionBackground: '#585b7066',
+  black: '#45475a', red: '#f38ba8', green: '#a6e3a1', yellow: '#f9e2af',
+  blue: '#89b4fa', magenta: '#cba6f7', cyan: '#94e2d5', white: '#bac2de',
+  brightBlack: '#585b70', brightRed: '#f38ba8', brightGreen: '#a6e3a1', brightYellow: '#f9e2af',
+  brightBlue: '#89b4fa', brightMagenta: '#cba6f7', brightCyan: '#94e2d5', brightWhite: '#a6adc8',
+};
+
+async function spawnTabTerminal(tab) {
+  tab.terminal = new XTerminal({
+    fontFamily: "'JetBrains Mono', 'Fira Code', 'SF Mono', 'Menlo', monospace",
+    fontSize: 13,
+    lineHeight: 1.3,
+    theme: XTERM_THEME,
+  });
+
+  tab.fitAddon = new XFitAddon();
+  tab.terminal.loadAddon(tab.fitAddon);
+  tab.terminal.loadAddon(new XWebLinksAddon());
+
+  // Only show in terminal container if this is the active tab
+  if (activeTabId === tab.id) {
+    terminalContainer.innerHTML = '';
+    tab.terminal.open(terminalContainer);
+    requestAnimationFrame(() => tab.fitAddon.fit());
+  } else {
+    // Open in a detached div so xterm initializes
+    const tmp = document.createElement('div');
+    tmp.style.position = 'absolute';
+    tmp.style.visibility = 'hidden';
+    document.body.appendChild(tmp);
+    tab.terminal.open(tmp);
+    requestAnimationFrame(() => {
+      tab.fitAddon.fit();
+      tmp.remove();
+    });
+  }
+
+  // Read-only terminal — only Ctrl+C passes through
+  tab.terminal.onData((data) => {
+    if (data === '\x03') window.api.writePty(tab.connId, data);
+  });
+
+  tab.terminal.onResize(({ cols, rows }) => window.api.resizePty(tab.connId, cols, rows));
+
+  await window.api.spawnPty(tab.connId, tab.connection);
+  updateConnectionStatus(tab.connId, true);
+}
+
+// ---- New connection dialog ----
 btnNewConn.addEventListener('click', () => {
   dialogTitle.textContent = 'New Connection';
   form.reset();
@@ -326,45 +449,45 @@ form.addEventListener('submit', async (e) => {
   dialog.close();
 });
 
+// ---- Query helpers ----
 function getRawEditorContent() {
-  return editorView ? editorView.state.doc.toString().trim() : '';
+  const tab = getActiveTab();
+  return tab?.editorView ? tab.editorView.state.doc.toString().trim() : '';
 }
 
-// Check if query contains psql metacommands (\gx, \g, \watch, \dt, etc.)
 function hasMetacommand(q) {
   return /\\[a-zA-Z+]/.test(q);
 }
 
 function getEditorContent() {
   let q = getRawEditorContent();
-  // Auto-append semicolon for SQL queries (not metacommands)
-  if (q && !hasMetacommand(q) && !q.endsWith(';')) {
-    q += ';';
-  }
+  if (q && !hasMetacommand(q) && !q.endsWith(';')) q += ';';
   return q;
 }
 
-// ---- Run query (structured results) ----
+// ---- Run query ----
 async function runQuery() {
-  if (!activeConnection) return;
+  const tab = getActiveTab();
+  if (!tab) return;
   const query = getEditorContent();
   if (!query) return;
 
-  // Metacommands (\dt, \gx, \watch, etc.) only work in interactive psql — route to terminal
   if (hasMetacommand(query)) {
     sendToTerminal();
     return;
   }
 
-  // Show loading
   resultsContainer.innerHTML = '<div class="results-loading"><div class="spinner"></div>Running...</div>';
   resultsStatus.textContent = '';
   resultsStatus.className = '';
 
-  const result = await window.api.executeQuery(activeConnection, query);
+  const result = await window.api.executeQuery(tab.connection, query);
+
+  // Only update if still on the same tab
+  if (getActiveTab()?.id !== tab.id) return;
 
   if (result.error) {
-    lastResults = null;
+    tab.lastResults = null;
     hideCopyButtons();
     resultsContainer.innerHTML = `<div class="results-message error">${escapeHtml(result.error)}</div>`;
     resultsStatus.textContent = `Error (${result.duration}ms)`;
@@ -373,7 +496,7 @@ async function runQuery() {
   }
 
   if (result.message) {
-    lastResults = null;
+    tab.lastResults = null;
     hideCopyButtons();
     resultsContainer.innerHTML = `<div class="results-message">${escapeHtml(result.message)}</div>`;
     resultsStatus.textContent = `Done (${result.duration}ms)`;
@@ -382,7 +505,7 @@ async function runQuery() {
   }
 
   if (result.columns) {
-    lastResults = { columns: result.columns, rows: result.rows };
+    tab.lastResults = { columns: result.columns, rows: result.rows };
     showCopyButtons();
     renderTable(result.columns, result.rows);
     resultsStatus.textContent = `${result.rowCount} row${result.rowCount !== 1 ? 's' : ''} (${result.duration}ms)`;
@@ -402,8 +525,6 @@ function hideCopyButtons() {
 
 function renderTable(columns, rows) {
   const table = document.createElement('table');
-
-  // Header
   const thead = document.createElement('thead');
   const headerRow = document.createElement('tr');
   columns.forEach((col) => {
@@ -414,7 +535,6 @@ function renderTable(columns, rows) {
   thead.appendChild(headerRow);
   table.appendChild(thead);
 
-  // Body
   const tbody = document.createElement('tbody');
   rows.forEach((row) => {
     const tr = document.createElement('tr');
@@ -425,7 +545,7 @@ function renderTable(columns, rows) {
         td.className = 'null-value';
       } else {
         td.textContent = cell;
-        td.title = cell; // tooltip for truncated content
+        td.title = cell;
       }
       tr.appendChild(td);
     });
@@ -451,25 +571,26 @@ function copyWithFeedback(btn, text) {
 }
 
 btnCopyCsv.addEventListener('click', () => {
-  if (!lastResults) return;
-  const lines = [lastResults.columns.join(',')];
-  for (const row of lastResults.rows) {
+  const tab = getActiveTab();
+  if (!tab?.lastResults) return;
+  const lines = [tab.lastResults.columns.join(',')];
+  for (const row of tab.lastResults.rows) {
     lines.push(row.map(cell => {
       if (cell === null || cell === undefined || cell === '') return '';
       const s = String(cell);
       return s.includes(',') || s.includes('"') || s.includes('\n')
-        ? '"' + s.replace(/"/g, '""') + '"'
-        : s;
+        ? '"' + s.replace(/"/g, '""') + '"' : s;
     }).join(','));
   }
   copyWithFeedback(btnCopyCsv, lines.join('\n'));
 });
 
 btnCopyJson.addEventListener('click', () => {
-  if (!lastResults) return;
-  const data = lastResults.rows.map(row => {
+  const tab = getActiveTab();
+  if (!tab?.lastResults) return;
+  const data = tab.lastResults.rows.map(row => {
     const obj = {};
-    lastResults.columns.forEach((col, i) => {
+    tab.lastResults.columns.forEach((col, i) => {
       obj[col] = (row[i] === '' || row[i] === undefined) ? null : row[i];
     });
     return obj;
@@ -479,18 +600,20 @@ btnCopyJson.addEventListener('click', () => {
 
 // ---- Send to terminal ----
 function sendToTerminal() {
-  if (!activeSessionId || !terminal) return;
+  const tab = getActiveTab();
+  if (!tab?.terminal) return;
   const query = getEditorContent();
   if (!query) return;
-  window.api.sendQuery(activeSessionId, query);
+  window.api.sendQuery(tab.connId, query);
 }
 
 btnRun.addEventListener('click', runQuery);
 btnSendTerminal.addEventListener('click', sendToTerminal);
 btnClear.addEventListener('click', () => {
-  if (editorView) {
-    editorView.dispatch({ changes: { from: 0, to: editorView.state.doc.length, insert: '' } });
-    editorView.focus();
+  const tab = getActiveTab();
+  if (tab?.editorView) {
+    tab.editorView.dispatch({ changes: { from: 0, to: tab.editorView.state.doc.length, insert: '' } });
+    tab.editorView.focus();
   }
 });
 
@@ -516,36 +639,34 @@ async function fetchDatabases(conn) {
 }
 
 dbSelector.addEventListener('change', async () => {
-  if (!activeConnection) return;
+  const tab = getActiveTab();
+  if (!tab) return;
   const newDb = dbSelector.value;
 
-  // Update connection with new database
-  activeConnection = { ...activeConnection, database: newDb };
+  tab.connection = { ...tab.connection, database: newDb };
 
-  // Also update in saved connections list
-  const idx = connections.findIndex((c) => c.id === activeSessionId);
+  const idx = connections.findIndex((c) => c.id === tab.connId);
   if (idx >= 0) {
     connections[idx] = { ...connections[idx], database: newDb };
     await window.api.saveConnections(connections.map(sanitizeConn));
   }
 
-  // Reconnect PTY
-  window.api.killPty(activeSessionId);
-  await window.api.spawnPty(activeSessionId, activeConnection);
-  connectionInfo.textContent = `${activeConnection.user || 'postgres'}@${activeConnection.host || 'localhost'}:${activeConnection.port || 5432}/${newDb}`;
+  window.api.killPty(tab.connId);
+  await window.api.spawnPty(tab.connId, tab.connection);
+  connectionInfo.textContent = `${tab.connection.user || 'postgres'}@${tab.connection.host || 'localhost'}:${tab.connection.port || 5432}/${newDb}`;
 
-  // Clear terminal and write a notice
-  terminal.clear();
-  terminal.write(`\x1b[33m[Switched to database: ${newDb}]\x1b[0m\r\n`);
+  if (tab.terminal) {
+    tab.terminal.clear();
+    tab.terminal.write(`\x1b[33m[Switched to database: ${newDb}]\x1b[0m\r\n`);
+  }
 
-  // Refresh schema
-  fetchSchema(activeConnection);
+  fetchSchemaForTab(tab);
 });
 
-// ---- Fetch schema for autocompletion ----
-async function fetchSchema(conn) {
+// ---- Schema ----
+async function fetchSchemaForTab(tab) {
   try {
-    const result = await window.api.executeQuery(conn,
+    const result = await window.api.executeQuery(tab.connection,
       `SELECT table_schema, table_name, column_name
        FROM information_schema.columns
        ORDER BY table_schema, table_name, ordinal_position`
@@ -554,24 +675,33 @@ async function fetchSchema(conn) {
       const schema = {};
       for (const row of result.rows) {
         const [schemaName, table, column] = row;
-        // Register with full qualified name (schema.table)
         const fullName = `${schemaName}.${table}`;
         if (!schema[fullName]) schema[fullName] = [];
         schema[fullName].push(column);
-        // Also register without prefix so you can type the table name directly
         if (!schema[table]) schema[table] = [];
         if (!schema[table].includes(column)) schema[table].push(column);
       }
       updateSchema(schema);
       // Recreate editor with updated schema
-      const content = getEditorContent();
-      editorContainer.innerHTML = '';
-      editorView = createEditor(editorContainer, {
-        onRun: runQuery,
-        onSendTerminal: sendToTerminal,
-      });
-      if (content) {
-        editorView.dispatch({ changes: { from: 0, insert: content } });
+      if (tab.editorView) {
+        const content = tab.editorView.state.doc.toString();
+        tab.editorView.destroy();
+        if (activeTabId === tab.id) {
+          editorContainer.innerHTML = '';
+          tab.editorView = createEditor(editorContainer, {
+            onRun: runQuery,
+            onSendTerminal: sendToTerminal,
+          });
+        } else {
+          const tmp = document.createElement('div');
+          tab.editorView = createEditor(tmp, {
+            onRun: runQuery,
+            onSendTerminal: sendToTerminal,
+          });
+        }
+        if (content) {
+          tab.editorView.dispatch({ changes: { from: 0, insert: content } });
+        }
       }
     }
   } catch (e) {
@@ -594,7 +724,6 @@ function setupResizeHandles() {
       document.body.style.userSelect = 'none';
       e.preventDefault();
 
-      // Capture initial sizes on drag start
       const startY = e.clientY;
       const startEditorH = editorPanel.getBoundingClientRect().height;
       const startResultsH = resultsPanel.getBoundingClientRect().height;
@@ -606,14 +735,12 @@ function setupResizeHandles() {
         const delta = e.clientY - startY;
 
         if (target === 'editor') {
-          // Editor resize: editor grows/shrinks, results absorbs, terminal stays
           const newEditorH = Math.max(60, startEditorH + delta);
           const newResultsH = startResultsH - (newEditorH - startEditorH);
           if (newResultsH < 60) return;
           editorPanel.style.height = newEditorH + 'px';
           resultsPanel.style.height = newResultsH + 'px';
         } else if (target === 'results') {
-          // Results resize: results grows/shrinks, terminal absorbs
           const newResultsH = Math.max(60, startResultsH + delta);
           const newTerminalH = startTerminalH - (newResultsH - startResultsH);
           if (newTerminalH < 80) return;
@@ -621,7 +748,8 @@ function setupResizeHandles() {
           terminalPanel.style.height = newTerminalH + 'px';
         }
 
-        if (fitAddon) fitAddon.fit();
+        const tab = getActiveTab();
+        if (tab?.fitAddon) tab.fitAddon.fit();
       };
 
       const onMouseUp = () => {
@@ -644,13 +772,15 @@ window.addEventListener('resize', () => {
   const termPanel = document.getElementById('terminal-panel');
   if (termPanel && session && !session.classList.contains('hidden')) {
     const mainH = document.getElementById('main').getBoundingClientRect().height;
+    const tabBarH = tabBar.classList.contains('hidden') ? 0 : tabBar.getBoundingClientRect().height;
     const editorH = editorPanel.getBoundingClientRect().height;
     const resultsH = resultsPanel.getBoundingClientRect().height;
     const handles = 8;
-    const remaining = mainH - editorH - resultsH - handles;
+    const remaining = mainH - tabBarH - editorH - resultsH - handles;
     termPanel.style.height = Math.max(80, remaining) + 'px';
   }
-  if (fitAddon) fitAddon.fit();
+  const tab = getActiveTab();
+  if (tab?.fitAddon) tab.fitAddon.fit();
 });
 
 // Escape closes dialog
