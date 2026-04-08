@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Aperium PSQL</title>
+  <link rel="stylesheet" href="../node_modules/@xterm/xterm/css/xterm.css">
+  <link rel="stylesheet" href="styles.css">
+  <script src="../node_modules/@xterm/xterm/lib/xterm.js"></script>
+  <script src="../node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
+  <script src="../node_modules/@xterm/addon-web-links/lib/addon-web-links.js"></script>
+  <script>
+    // Make xterm globals available before the bundle loads
+    window._Terminal = Terminal;
+    window._FitAddon = FitAddon;
+    window._WebLinksAddon = WebLinksAddon;
+  </script>
+</head>
+<body>
+  <!-- Sidebar -->
+  <aside id="sidebar">
+    <div class="sidebar-header">
+      <h1>Aperium</h1>
+      <button id="btn-new-connection" title="New connection">+</button>
+    </div>
+    <div id="connection-list"></div>
+  </aside>
+
+  <!-- Main area -->
+  <main id="main">
+    <!-- Welcome screen -->
+    <div id="welcome">
+      <div class="welcome-content">
+        <h2>Aperium PSQL</h2>
+        <p>A clean PostgreSQL client with a real psql terminal.</p>
+        <p class="hint">Add a connection from the sidebar to get started.</p>
+      </div>
+    </div>
+
+    <!-- Active session (hidden until connected) -->
+    <div id="session" class="hidden">
+      <!-- SQL Editor -->
+      <div id="editor-panel">
+        <div id="editor-toolbar">
+          <span class="editor-label">SQL Editor</span>
+          <div class="editor-actions">
+            <select id="db-selector" title="Switch database"></select>
+            <button id="btn-run" title="Run query (Cmd+Enter)">Run</button>
+            <button id="btn-send-terminal" title="Send to psql terminal (Cmd+Shift+Enter)">Send to terminal</button>
+            <button id="btn-clear-editor" title="Clear editor">Clear</button>
+          </div>
+        </div>
+        <div id="editor-container"></div>
+      </div>
+
+      <!-- Resize handle 1 -->
+      <div class="resize-handle" data-target="editor"></div>
+
+      <!-- Results panel -->
+      <div id="results-panel">
+        <div id="results-toolbar">
+          <span class="results-label">Results</span>
+          <div class="results-right">
+            <span id="results-status"></span>
+            <button id="btn-copy-csv" class="results-btn hidden" title="Copy as CSV">Copy CSV</button>
+            <button id="btn-copy-json" class="results-btn hidden" title="Copy as JSON">Copy JSON</button>
+          </div>
+        </div>
+        <div id="results-container">
+          <div id="results-placeholder">Run a query to see results here.</div>
+        </div>
+      </div>
+
+      <!-- Resize handle 2 -->
+      <div class="resize-handle" data-target="results"></div>
+
+      <!-- Terminal -->
+      <div id="terminal-panel">
+        <div id="terminal-toolbar">
+          <span class="terminal-label">psql terminal</span>
+          <span id="connection-info" class="connection-badge"></span>
+        </div>
+        <div id="terminal-container"></div>
+      </div>
+    </div>
+  </main>
+
+  <!-- Connection dialog -->
+  <dialog id="connection-dialog">
+    <form id="connection-form" method="dialog">
+      <h3 id="dialog-title">New Connection</h3>
+      <label>
+        Name
+        <input type="text" name="name" placeholder="My Database" required>
+      </label>
+      <label>
+        Host
+        <input type="text" name="host" placeholder="localhost" value="localhost">
+      </label>
+      <label>
+        Port
+        <input type="number" name="port" placeholder="5432" value="5432">
+      </label>
+      <label>
+        User
+        <input type="text" name="user" placeholder="postgres">
+      </label>
+      <label>
+        Password
+        <input type="password" name="password" placeholder="(optional)">
+      </label>
+      <label>
+        Database
+        <input type="text" name="database" placeholder="postgres" value="postgres">
+      </label>
+      <label>
+        SSL Mode
+        <select name="sslmode">
+          <option value="">Default</option>
+          <option value="disable">Disable</option>
+          <option value="require">Require</option>
+          <option value="verify-ca">Verify CA</option>
+          <option value="verify-full">Verify Full</option>
+        </select>
+      </label>
+      <input type="hidden" name="id" value="">
+      <div class="dialog-actions">
+        <button type="button" id="btn-cancel">Cancel</button>
+        <button type="submit">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="../dist/renderer.bundle.js"></script>
+</body>
+</html>

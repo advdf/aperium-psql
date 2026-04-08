@@ -1,0 +1,34 @@
+{
+  "name": "aperium-psql",
+  "productName": "Aperium PSQL",
+  "version": "0.1.0",
+  "description": "A clean PostgreSQL UI with real psql terminal",
+  "main": "main.js",
+  "scripts": {
+    "build": "esbuild src/renderer.js --bundle --outfile=dist/renderer.bundle.js --platform=browser --format=iife --target=chrome120",
+    "start": "npm run build && electron .",
+    "package": "npm run build && npx @electron/packager . 'Aperium PSQL' --platform=darwin --arch=arm64 --icon=assets/icon.icns --overwrite --prune=true --ignore='(src/|assets/icon.iconset|assets/icon_rounded|assets/icon_macos|\\.iconset)',",
+    "rebuild": "electron-rebuild"
+  },
+  "dependencies": {
+    "@codemirror/autocomplete": "^6.20.1",
+    "@codemirror/commands": "^6.10.3",
+    "@codemirror/lang-sql": "^6.10.0",
+    "@codemirror/language": "^6.12.3",
+    "@codemirror/search": "^6.6.0",
+    "@codemirror/state": "^6.6.0",
+    "@codemirror/view": "^6.41.0",
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/addon-web-links": "^0.11.0",
+    "@xterm/xterm": "^5.5.0",
+    "codemirror": "^6.0.2",
+    "esbuild": "^0.28.0",
+    "node-pty": "^1.0.0"
+  },
+  "devDependencies": {
+    "@electron/packager": "^19.1.0",
+    "@electron/rebuild": "^4.0.3",
+    "electron": "^33.0.0",
+    "electron-rebuild": "^3.2.9"
+  }
+}
