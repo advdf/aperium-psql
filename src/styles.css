@@ -144,7 +144,7 @@ button, input, textarea, select, a, #sidebar, #main {
 }
 
 .conn-group-items .conn-item {
-  padding-left: 28px;
+  /* padding-left set dynamically by JS based on depth */
 }
 
 .group-input-wrapper {

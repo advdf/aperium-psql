@@ -131,11 +131,8 @@ ipcMain.on('pty:send-query', (_, { id, query }) => {
   console.log('pty:send-query received, id:', id, 'query:', query);
   const session = ptySessions.get(id);
   if (session) {
-    // Send each line individually so psql processes them correctly
-    const lines = query.trim().split('\n');
-    for (const line of lines) {
-      session.write(line + '\r');
-    }
+    // Send the whole query followed by a newline
+    session.write(query.trim() + '\r');
   } else {
     console.log('No session found for id:', id);
   }

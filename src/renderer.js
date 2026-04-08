@@ -74,48 +74,80 @@ const collapsedGroups = new Set();
 
 function renderConnections() {
   connectionList.innerHTML = '';
-  const groups = new Map();
-  const ungrouped = [];
+
+  // Build tree from group paths (e.g. "cnpg/dev" -> cnpg -> dev)
+  const tree = { children: new Map(), conns: [] };
 
   connections.forEach((conn) => {
     if (conn.group && conn.group.trim()) {
-      const g = conn.group.trim();
-      if (!groups.has(g)) groups.set(g, []);
-      groups.get(g).push(conn);
+      const parts = conn.group.trim().split('/').map(p => p.trim()).filter(Boolean);
+      let node = tree;
+      for (const part of parts) {
+        if (!node.children.has(part)) {
+          node.children.set(part, { children: new Map(), conns: [] });
+        }
+        node = node.children.get(part);
+      }
+      node.conns.push(conn);
     } else {
-      ungrouped.push(conn);
+      tree.conns.push(conn);
     }
   });
 
-  for (const [groupName, conns] of groups) {
-    const isCollapsed = collapsedGroups.has(groupName);
+  // Render tree recursively
+  renderGroupNode(tree, connectionList, '', 0);
+  updateGroupSuggestions();
+}
+
+function countNodeConns(node) {
+  let count = node.conns.length;
+  for (const [, child] of node.children) {
+    count += countNodeConns(child);
+  }
+  return count;
+}
+
+function renderGroupNode(node, container, pathPrefix, depth) {
+  // Render child groups
+  for (const [name, child] of node.children) {
+    const fullPath = pathPrefix ? `${pathPrefix}/${name}` : name;
+    const isCollapsed = collapsedGroups.has(fullPath);
+    const total = countNodeConns(child);
+
     const groupEl = document.createElement('div');
     groupEl.className = 'conn-group';
 
     const header = document.createElement('div');
     header.className = 'conn-group-header' + (isCollapsed ? ' collapsed' : '');
+    header.style.paddingLeft = (10 + depth * 14) + 'px';
     header.innerHTML = `
       <span class="group-chevron">&#9660;</span>
-      <span class="group-name">${escapeHtml(groupName)}</span>
-      <span class="group-count">${conns.length}</span>
+      <span class="group-name">${escapeHtml(name)}</span>
+      <span class="group-count">${total}</span>
     `;
     header.addEventListener('click', () => {
-      if (collapsedGroups.has(groupName)) collapsedGroups.delete(groupName);
-      else collapsedGroups.add(groupName);
+      if (collapsedGroups.has(fullPath)) collapsedGroups.delete(fullPath);
+      else collapsedGroups.add(fullPath);
       renderConnections();
     });
 
     const itemsEl = document.createElement('div');
     itemsEl.className = 'conn-group-items' + (isCollapsed ? ' collapsed' : '');
-    conns.forEach((conn) => itemsEl.appendChild(createConnItem(conn)));
+
+    // Recursively render sub-groups and connections
+    renderGroupNode(child, itemsEl, fullPath, depth + 1);
 
     groupEl.appendChild(header);
     groupEl.appendChild(itemsEl);
-    connectionList.appendChild(groupEl);
+    container.appendChild(groupEl);
   }
 
-  ungrouped.forEach((conn) => connectionList.appendChild(createConnItem(conn)));
-  updateGroupSuggestions();
+  // Render connections at this level
+  node.conns.forEach((conn) => {
+    const item = createConnItem(conn);
+    item.style.paddingLeft = (10 + (depth) * 14) + 'px';
+    container.appendChild(item);
+  });
 }
 
 function createConnItem(conn) {
