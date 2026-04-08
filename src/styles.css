@@ -89,6 +89,68 @@ button, input, textarea, select, a, #sidebar, #main {
   padding: 4px 8px;
 }
 
+/* Groups */
+.conn-group {
+  margin-bottom: 4px;
+}
+
+.conn-group-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  cursor: pointer;
+  border-radius: var(--radius);
+  transition: background 0.15s;
+  user-select: none;
+}
+
+.conn-group-header:hover {
+  background: var(--bg-surface);
+}
+
+.conn-group-header .group-chevron {
+  font-size: 10px;
+  color: var(--text-dim);
+  transition: transform 0.15s;
+  width: 12px;
+  text-align: center;
+}
+
+.conn-group-header.collapsed .group-chevron {
+  transform: rotate(-90deg);
+}
+
+.conn-group-header .group-name {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.conn-group-header .group-count {
+  font-size: 10px;
+  color: var(--text-dim);
+  margin-left: auto;
+}
+
+.conn-group-items {
+  overflow: hidden;
+}
+
+.conn-group-items.collapsed {
+  display: none;
+}
+
+.conn-group-items .conn-item {
+  padding-left: 28px;
+}
+
+.group-input-wrapper {
+  position: relative;
+}
+
 .conn-item {
   padding: 8px 10px;
   border-radius: var(--radius);
@@ -448,7 +510,7 @@ button, input, textarea, select, a, #sidebar, #main {
 
 /* Terminal panel */
 #terminal-panel {
-  flex: 1;
+  flex: none;
   display: flex;
   flex-direction: column;
   overflow: hidden;

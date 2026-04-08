@@ -1,5 +1,5 @@
 import { EditorView, keymap, placeholder } from '@codemirror/view';
-import { EditorState } from '@codemirror/state';
+import { EditorState, Prec } from '@codemirror/state';
 import { sql, PostgreSQL } from '@codemirror/lang-sql';
 import { autocompletion, acceptCompletion } from '@codemirror/autocomplete';
 import { defaultKeymap, indentWithTab } from '@codemirror/commands';
@@ -123,7 +123,7 @@ export function createEditor(parent, { onRun, onSendTerminal }) {
   const state = EditorState.create({
     doc: '',
     extensions: [
-      runKeymap,
+      Prec.highest(runKeymap),
       keymap.of([...defaultKeymap, indentWithTab, ...searchKeymap]),
       sql({
         dialect: PostgreSQL,

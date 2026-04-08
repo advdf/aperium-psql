@@ -60,26 +60,92 @@ async function init() {
 }
 
 // Connections
+const collapsedGroups = new Set();
+
 function renderConnections() {
   connectionList.innerHTML = '';
+
+  // Group connections
+  const groups = new Map(); // group name -> connections[]
+  const ungrouped = [];
+
   connections.forEach((conn) => {
-    const el = document.createElement('div');
-    el.className = 'conn-item' + (conn.id === activeSessionId ? ' active' : '');
-    el.innerHTML = `
-      <div class="conn-status ${conn._connected ? 'connected' : ''}"></div>
-      <span class="conn-name">${escapeHtml(conn.name)}</span>
-      <div class="conn-item-actions">
-        <button class="edit" title="Edit">&#9998;</button>
-        <button class="delete" title="Delete">&times;</button>
-      </div>
-    `;
-    el.addEventListener('click', (e) => {
-      if (e.target.closest('.edit')) openEditDialog(conn);
-      else if (e.target.closest('.delete')) deleteConnection(conn.id);
-      else connectTo(conn);
-    });
-    connectionList.appendChild(el);
+    if (conn.group && conn.group.trim()) {
+      const g = conn.group.trim();
+      if (!groups.has(g)) groups.set(g, []);
+      groups.get(g).push(conn);
+    } else {
+      ungrouped.push(conn);
+    }
   });
+
+  // Render groups
+  for (const [groupName, conns] of groups) {
+    const isCollapsed = collapsedGroups.has(groupName);
+
+    const groupEl = document.createElement('div');
+    groupEl.className = 'conn-group';
+
+    const header = document.createElement('div');
+    header.className = 'conn-group-header' + (isCollapsed ? ' collapsed' : '');
+    header.innerHTML = `
+      <span class="group-chevron">&#9660;</span>
+      <span class="group-name">${escapeHtml(groupName)}</span>
+      <span class="group-count">${conns.length}</span>
+    `;
+    header.addEventListener('click', () => {
+      if (collapsedGroups.has(groupName)) {
+        collapsedGroups.delete(groupName);
+      } else {
+        collapsedGroups.add(groupName);
+      }
+      renderConnections();
+    });
+
+    const itemsEl = document.createElement('div');
+    itemsEl.className = 'conn-group-items' + (isCollapsed ? ' collapsed' : '');
+    conns.forEach((conn) => itemsEl.appendChild(createConnItem(conn)));
+
+    groupEl.appendChild(header);
+    groupEl.appendChild(itemsEl);
+    connectionList.appendChild(groupEl);
+  }
+
+  // Render ungrouped
+  ungrouped.forEach((conn) => connectionList.appendChild(createConnItem(conn)));
+
+  // Update datalist for group suggestions
+  updateGroupSuggestions();
+}
+
+function createConnItem(conn) {
+  const el = document.createElement('div');
+  el.className = 'conn-item' + (conn.id === activeSessionId ? ' active' : '');
+  el.innerHTML = `
+    <div class="conn-status ${conn._connected ? 'connected' : ''}"></div>
+    <span class="conn-name">${escapeHtml(conn.name)}</span>
+    <div class="conn-item-actions">
+      <button class="edit" title="Edit">&#9998;</button>
+      <button class="delete" title="Delete">&times;</button>
+    </div>
+  `;
+  el.addEventListener('click', (e) => {
+    if (e.target.closest('.edit')) openEditDialog(conn);
+    else if (e.target.closest('.delete')) deleteConnection(conn.id);
+    else connectTo(conn);
+  });
+  return el;
+}
+
+function updateGroupSuggestions() {
+  const datalist = document.getElementById('group-suggestions');
+  datalist.innerHTML = '';
+  const groupNames = new Set(connections.map(c => c.group).filter(Boolean));
+  for (const name of groupNames) {
+    const opt = document.createElement('option');
+    opt.value = name;
+    datalist.appendChild(opt);
+  }
 }
 
 function updateConnectionStatus(id, connected) {
@@ -93,6 +159,7 @@ function updateConnectionStatus(id, connected) {
 function openEditDialog(conn) {
   dialogTitle.textContent = 'Edit Connection';
   form.elements.id.value = conn.id;
+  form.elements.group.value = conn.group || '';
   form.elements.name.value = conn.name;
   form.elements.host.value = conn.host || 'localhost';
   form.elements.port.value = conn.port || 5432;
@@ -100,6 +167,7 @@ function openEditDialog(conn) {
   form.elements.password.value = conn.password || '';
   form.elements.database.value = conn.database || 'postgres';
   form.elements.sslmode.value = conn.sslmode || '';
+  updateGroupSuggestions();
   dialog.showModal();
 }
 
@@ -132,6 +200,17 @@ async function connectTo(conn) {
 
   welcome.style.display = 'none';
   session.classList.remove('hidden');
+
+  // Set initial terminal height (remaining space after editor + results + toolbars + handles)
+  requestAnimationFrame(() => {
+    const termPanel = document.getElementById('terminal-panel');
+    const mainH = document.getElementById('main').getBoundingClientRect().height;
+    const editorH = editorPanel.getBoundingClientRect().height;
+    const resultsH = resultsPanel.getBoundingClientRect().height;
+    const handles = 8; // 2 resize handles x 4px
+    const remaining = mainH - editorH - resultsH - handles;
+    termPanel.style.height = Math.max(80, remaining) + 'px';
+  });
 
   // Setup terminal
   if (terminal) terminal.dispose();
@@ -218,9 +297,11 @@ btnNewConn.addEventListener('click', () => {
   dialogTitle.textContent = 'New Connection';
   form.reset();
   form.elements.id.value = '';
+  form.elements.group.value = '';
   form.elements.host.value = 'localhost';
   form.elements.port.value = '5432';
   form.elements.database.value = 'postgres';
+  updateGroupSuggestions();
   dialog.showModal();
 });
 
@@ -245,8 +326,22 @@ form.addEventListener('submit', async (e) => {
   dialog.close();
 });
 
-function getEditorContent() {
+function getRawEditorContent() {
   return editorView ? editorView.state.doc.toString().trim() : '';
+}
+
+// Check if query contains psql metacommands (\gx, \g, \watch, \dt, etc.)
+function hasMetacommand(q) {
+  return /\\[a-zA-Z+]/.test(q);
+}
+
+function getEditorContent() {
+  let q = getRawEditorContent();
+  // Auto-append semicolon for SQL queries (not metacommands)
+  if (q && !hasMetacommand(q) && !q.endsWith(';')) {
+    q += ';';
+  }
+  return q;
 }
 
 // ---- Run query (structured results) ----
@@ -255,8 +350,8 @@ async function runQuery() {
   const query = getEditorContent();
   if (!query) return;
 
-  // Metacommands (\dt, \dn, etc.) only work in interactive psql — route to terminal
-  if (query.match(/^\s*\\/m)) {
+  // Metacommands (\dt, \gx, \watch, etc.) only work in interactive psql — route to terminal
+  if (hasMetacommand(query)) {
     sendToTerminal();
     return;
   }
@@ -499,17 +594,31 @@ function setupResizeHandles() {
       document.body.style.userSelect = 'none';
       e.preventDefault();
 
+      // Capture initial sizes on drag start
+      const startY = e.clientY;
+      const startEditorH = editorPanel.getBoundingClientRect().height;
+      const startResultsH = resultsPanel.getBoundingClientRect().height;
+      const terminalPanel = document.getElementById('terminal-panel');
+      const startTerminalH = terminalPanel.getBoundingClientRect().height;
+
       const onMouseMove = (e) => {
         if (!isResizing) return;
-        const mainRect = document.getElementById('main').getBoundingClientRect();
+        const delta = e.clientY - startY;
 
         if (target === 'editor') {
-          const newHeight = e.clientY - mainRect.top;
-          editorPanel.style.height = Math.max(60, Math.min(newHeight, mainRect.height - 200)) + 'px';
+          // Editor resize: editor grows/shrinks, results absorbs, terminal stays
+          const newEditorH = Math.max(60, startEditorH + delta);
+          const newResultsH = startResultsH - (newEditorH - startEditorH);
+          if (newResultsH < 60) return;
+          editorPanel.style.height = newEditorH + 'px';
+          resultsPanel.style.height = newResultsH + 'px';
         } else if (target === 'results') {
-          const editorBottom = editorPanel.getBoundingClientRect().bottom + 4; // handle height
-          const newHeight = e.clientY - editorBottom;
-          resultsPanel.style.height = Math.max(60, Math.min(newHeight, mainRect.height - 200)) + 'px';
+          // Results resize: results grows/shrinks, terminal absorbs
+          const newResultsH = Math.max(60, startResultsH + delta);
+          const newTerminalH = startTerminalH - (newResultsH - startResultsH);
+          if (newTerminalH < 80) return;
+          resultsPanel.style.height = newResultsH + 'px';
+          terminalPanel.style.height = newTerminalH + 'px';
         }
 
         if (fitAddon) fitAddon.fit();
@@ -532,6 +641,15 @@ function setupResizeHandles() {
 
 // Window resize
 window.addEventListener('resize', () => {
+  const termPanel = document.getElementById('terminal-panel');
+  if (termPanel && session && !session.classList.contains('hidden')) {
+    const mainH = document.getElementById('main').getBoundingClientRect().height;
+    const editorH = editorPanel.getBoundingClientRect().height;
+    const resultsH = resultsPanel.getBoundingClientRect().height;
+    const handles = 8;
+    const remaining = mainH - editorH - resultsH - handles;
+    termPanel.style.height = Math.max(80, remaining) + 'px';
+  }
   if (fitAddon) fitAddon.fit();
 });
 

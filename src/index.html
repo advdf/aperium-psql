@@ -90,6 +90,13 @@
     <form id="connection-form" method="dialog">
       <h3 id="dialog-title">New Connection</h3>
       <label>
+        Group
+        <div class="group-input-wrapper">
+          <input type="text" name="group" placeholder="e.g. Dev, Preprod, Prod" list="group-suggestions">
+          <datalist id="group-suggestions"></datalist>
+        </div>
+      </label>
+      <label>
         Name
         <input type="text" name="name" placeholder="My Database" required>
       </label>

@@ -81,6 +81,9 @@ ipcMain.handle('pty:spawn', (event, { id, connection }) => {
     if (connection.sslmode) {
       env.PGSSLMODE = connection.sslmode;
     }
+    // Disable pager so output flows freely (terminal is read-only)
+    env.PSQL_PAGER = 'cat';
+    env.PAGER = 'cat';
 
     console.log('Spawning psql with args:', args);
 
