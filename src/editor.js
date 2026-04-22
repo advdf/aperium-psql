@@ -104,7 +104,7 @@ export function updateSchema(schema) {
   schemaState = schema;
 }
 
-export function createEditor(parent, { onRun, onSendTerminal }) {
+export function createEditor(parent, { onRun, onSendTerminal, onHistoryPrev, onHistoryNext }) {
   const runKeymap = keymap.of([
     {
       key: 'Mod-Enter',
@@ -117,6 +117,14 @@ export function createEditor(parent, { onRun, onSendTerminal }) {
     {
       key: 'Tab',
       run: acceptCompletion,
+    },
+    {
+      key: 'Mod-ArrowUp',
+      run: () => { if (onHistoryPrev) onHistoryPrev(); return true; },
+    },
+    {
+      key: 'Mod-ArrowDown',
+      run: () => { if (onHistoryNext) onHistoryNext(); return true; },
     },
   ]);
 

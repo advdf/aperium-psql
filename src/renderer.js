@@ -38,6 +38,20 @@ const resultsStatus = document.getElementById('results-status');
 const dbSelector = document.getElementById('db-selector');
 const btnCopyCsv = document.getElementById('btn-copy-csv');
 const btnCopyJson = document.getElementById('btn-copy-json');
+const btnExportCsv = document.getElementById('btn-export-csv');
+const btnExportJson = document.getElementById('btn-export-json');
+const btnStop = document.getElementById('btn-stop');
+const connSearch = document.getElementById('conn-search');
+const terminalPanel = document.getElementById('terminal-panel');
+
+// ---- Sidebar search ----
+connSearch.addEventListener('input', () => {
+  // When searching, expand all groups to show matches
+  if (connSearch.value.trim()) {
+    collapsedGroups.clear();
+  }
+  renderConnections();
+});
 
 // ---- Init ----
 async function init() {
@@ -48,7 +62,7 @@ async function init() {
   window.api.onPtyData(({ id, data }) => {
     // Route data to the correct tab's terminal
     for (const [, tab] of tabs) {
-      if (tab.connId === id && tab.terminal) {
+      if (tab.ptyId === id && tab.terminal) {
         tab.terminal.write(data);
       }
     }
@@ -56,12 +70,69 @@ async function init() {
 
   window.api.onPtyExit(({ id, exitCode }) => {
     for (const [, tab] of tabs) {
-      if (tab.connId === id && tab.terminal) {
+      if (tab.ptyId === id && tab.terminal) {
         tab.terminal.write(`\r\n\x1b[33m[psql exited with code ${exitCode}]\x1b[0m\r\n`);
-        updateConnectionStatus(id, false);
+        updateConnectionStatus(tab.connId, false);
       }
     }
   });
+}
+
+// ---- Query history ----
+const MAX_HISTORY = 100;
+
+function addToHistory(query) {
+  const tab = getActiveTab();
+  if (!tab) return;
+  if (!tab.history) tab.history = [];
+  const trimmed = query.trim();
+  if (!trimmed) return;
+  // Don't add duplicates of the last entry
+  if (tab.history.length > 0 && tab.history[tab.history.length - 1] === trimmed) return;
+  tab.history.push(trimmed);
+  if (tab.history.length > MAX_HISTORY) tab.history.shift();
+  tab.historyIndex = tab.history.length;
+}
+
+function historyPrev() {
+  const tab = getActiveTab();
+  if (!tab?.history || tab.history.length === 0) return;
+  if (tab.historyIndex === undefined) tab.historyIndex = tab.history.length;
+  // Save current editor content if at the end
+  if (tab.historyIndex === tab.history.length) {
+    tab.historySaved = tab.editorView?.state.doc.toString() || '';
+  }
+  tab.historyIndex = Math.max(0, tab.historyIndex - 1);
+  setEditorContent(tab.history[tab.historyIndex]);
+}
+
+function historyNext() {
+  const tab = getActiveTab();
+  if (!tab?.history) return;
+  if (tab.historyIndex === undefined) return;
+  tab.historyIndex = Math.min(tab.history.length, tab.historyIndex + 1);
+  if (tab.historyIndex === tab.history.length) {
+    setEditorContent(tab.historySaved || '');
+  } else {
+    setEditorContent(tab.history[tab.historyIndex]);
+  }
+}
+
+function setEditorContent(text) {
+  const tab = getActiveTab();
+  if (!tab?.editorView) return;
+  tab.editorView.dispatch({
+    changes: { from: 0, to: tab.editorView.state.doc.length, insert: text },
+  });
+}
+
+function editorCallbacks() {
+  return {
+    onRun: runQuery,
+    onSendTerminal: sendToTerminal,
+    onHistoryPrev: historyPrev,
+    onHistoryNext: historyNext,
+  };
 }
 
 // ---- Active tab helpers ----
@@ -71,14 +142,34 @@ function getActiveTab() {
 
 // ---- Connections rendering ----
 const collapsedGroups = new Set();
+let groupsInitialized = false;
+
+function collectGroupPaths(node, prefix) {
+  for (const [name, child] of node.children) {
+    const fullPath = prefix ? `${prefix}/${name}` : name;
+    collapsedGroups.add(fullPath);
+    collectGroupPaths(child, fullPath);
+  }
+}
 
 function renderConnections() {
   connectionList.innerHTML = '';
 
+  const searchTerm = (connSearch?.value || '').toLowerCase().trim();
+
+  // Filter connections by search
+  const filtered = searchTerm
+    ? connections.filter(c =>
+        (c.name || '').toLowerCase().includes(searchTerm) ||
+        (c.host || '').toLowerCase().includes(searchTerm) ||
+        (c.group || '').toLowerCase().includes(searchTerm) ||
+        (c.database || '').toLowerCase().includes(searchTerm))
+    : connections;
+
   // Build tree from group paths (e.g. "cnpg/dev" -> cnpg -> dev)
   const tree = { children: new Map(), conns: [] };
 
-  connections.forEach((conn) => {
+  filtered.forEach((conn) => {
     if (conn.group && conn.group.trim()) {
       const parts = conn.group.trim().split('/').map(p => p.trim()).filter(Boolean);
       let node = tree;
@@ -93,6 +184,12 @@ function renderConnections() {
       tree.conns.push(conn);
     }
   });
+
+  // Collapse all groups on first render
+  if (!groupsInitialized) {
+    groupsInitialized = true;
+    collectGroupPaths(tree, '');
+  }
 
   // Render tree recursively
   renderGroupNode(tree, connectionList, '', 0);
@@ -164,14 +261,18 @@ function createConnItem(conn) {
     <div class="conn-status ${isConnected ? 'connected' : ''}"></div>
     <span class="conn-name">${escapeHtml(conn.name)}</span>
     <div class="conn-item-actions">
+      <button class="conn-new-tab" title="Open in new tab (Cmd+click)">+</button>
       <button class="edit" title="Edit">&#9998;</button>
+      <button class="duplicate" title="Duplicate">&#10697;</button>
       <button class="delete" title="Delete">&times;</button>
     </div>
   `;
   el.addEventListener('click', (e) => {
     if (e.target.closest('.edit')) openEditDialog(conn);
+    else if (e.target.closest('.duplicate')) openDuplicateDialog(conn);
     else if (e.target.closest('.delete')) deleteConnection(conn.id);
-    else openTab(conn);
+    else if (e.target.closest('.conn-new-tab')) openTab(conn, true);
+    else openTab(conn, e.metaKey || e.ctrlKey);
   });
   return el;
 }
@@ -210,6 +311,21 @@ function openEditDialog(conn) {
   dialog.showModal();
 }
 
+function openDuplicateDialog(conn) {
+  dialogTitle.textContent = 'Duplicate Connection';
+  form.elements.id.value = '';
+  form.elements.group.value = conn.group || '';
+  form.elements.name.value = `${conn.name} (copy)`;
+  form.elements.host.value = conn.host || 'localhost';
+  form.elements.port.value = conn.port || 5432;
+  form.elements.user.value = conn.user || '';
+  form.elements.password.value = conn.password || '';
+  form.elements.database.value = conn.database || 'postgres';
+  form.elements.sslmode.value = conn.sslmode || '';
+  updateGroupSuggestions();
+  dialog.showModal();
+}
+
 async function deleteConnection(id) {
   connections = connections.filter((c) => c.id !== id);
   await window.api.saveConnections(connections.map(sanitizeConn));
@@ -226,12 +342,14 @@ function sanitizeConn(c) {
 }
 
 // ---- Tab management ----
-function openTab(conn) {
-  // Check if a tab already exists for this connection
-  for (const [tabId, tab] of tabs) {
-    if (tab.connId === conn.id) {
-      switchTab(tabId);
-      return;
+function openTab(conn, forceNew = false) {
+  // Switch to existing tab unless forceNew is true
+  if (!forceNew) {
+    for (const [tabId, tab] of tabs) {
+      if (tab.connId === conn.id) {
+        switchTab(tabId);
+        return;
+      }
     }
   }
 
@@ -241,6 +359,7 @@ function openTab(conn) {
 
   const tab = {
     id: tabId,
+    ptyId: tabId, // unique per tab so multiple tabs can share a connection
     connId: conn.id,
     connName: conn.name,
     connection: cleanConn,
@@ -252,16 +371,29 @@ function openTab(conn) {
     resultsStatusText: '',
     resultsStatusClass: '',
     lastResults: null,
+    collapsedPanels: { editor: false, results: false, terminal: false },
+    history: [],
+    historyIndex: 0,
   };
 
   tabs.set(tabId, tab);
   switchTab(tabId);
   spawnTabTerminal(tab);
-  fetchDatabases(cleanConn);
+  fetchDatabases(cleanConn, tab);
   fetchSchemaForTab(tab);
 }
 
 function switchTab(tabId) {
+  stopAutoRefresh();
+  // Reset stop/run button visibility based on incoming tab
+  const incoming = tabs.get(tabId);
+  if (incoming?.currentQueryId) {
+    btnStop.classList.remove('hidden');
+    btnRun.classList.add('hidden');
+  } else {
+    btnStop.classList.add('hidden');
+    btnRun.classList.remove('hidden');
+  }
   const prevTab = getActiveTab();
 
   // Save current tab state
@@ -297,10 +429,7 @@ function switchTab(tabId) {
   if (tab.editorView) {
     editorContainer.appendChild(tab.editorView.dom);
   } else {
-    tab.editorView = createEditor(editorContainer, {
-      onRun: runQuery,
-      onSendTerminal: sendToTerminal,
-    });
+    tab.editorView = createEditor(editorContainer, editorCallbacks());
     if (tab.editorContent) {
       tab.editorView.dispatch({ changes: { from: 0, insert: tab.editorContent } });
     }
@@ -316,6 +445,18 @@ function switchTab(tabId) {
     hideCopyButtons();
   }
 
+  // Restore collapse state
+  for (const [name, panel] of Object.entries(panelMap)) {
+    const btn = panel.querySelector('.panel-collapse-btn');
+    if (tab.collapsedPanels?.[name]) {
+      panel.classList.add('panel-collapsed');
+      btn?.classList.add('collapsed');
+    } else {
+      panel.classList.remove('panel-collapsed');
+      btn?.classList.remove('collapsed');
+    }
+  }
+
   // Restore terminal
   terminalContainer.innerHTML = '';
   if (tab.terminal) {
@@ -327,16 +468,16 @@ function switchTab(tabId) {
   const c = tab.connection;
   connectionInfo.textContent = `${c.user || 'postgres'}@${c.host || 'localhost'}:${c.port || 5432}/${c.database || 'postgres'}`;
 
-  // Set terminal height
+  // Restore database selector for this tab
+  if (tab.databases) {
+    renderDbSelector(tab.databases, c.database || 'postgres');
+  } else {
+    dbSelector.innerHTML = '';
+  }
+
+  // Distribute panel space
   requestAnimationFrame(() => {
-    const termPanel = document.getElementById('terminal-panel');
-    const mainH = document.getElementById('main').getBoundingClientRect().height;
-    const tabBarH = tabBar.getBoundingClientRect().height;
-    const editorH = editorPanel.getBoundingClientRect().height;
-    const resultsH = resultsPanel.getBoundingClientRect().height;
-    const handles = 8;
-    const remaining = mainH - tabBarH - editorH - resultsH - handles;
-    termPanel.style.height = Math.max(80, remaining) + 'px';
+    redistributePanelSpace();
     if (tab.fitAddon) tab.fitAddon.fit();
   });
 
@@ -346,13 +487,14 @@ function switchTab(tabId) {
 }
 
 function closeTab(tabId) {
+  stopAutoRefresh();
   const tab = tabs.get(tabId);
   if (!tab) return;
 
   // Cleanup
   if (tab.terminal) tab.terminal.dispose();
   if (tab.editorView) tab.editorView.destroy();
-  window.api.killPty(tab.connId);
+  window.api.killPty(tab.ptyId);
 
   tabs.delete(tabId);
 
@@ -375,11 +517,27 @@ function closeTab(tabId) {
 
 function renderTabs() {
   tabList.innerHTML = '';
+
+  // Count occurrences per connId to add suffixes when same conn is opened multiple times
+  const counts = new Map();
+  const seenIndex = new Map();
+  for (const [, tab] of tabs) {
+    counts.set(tab.connId, (counts.get(tab.connId) || 0) + 1);
+  }
+
   for (const [tabId, tab] of tabs) {
     const el = document.createElement('div');
     el.className = 'tab' + (tabId === activeTabId ? ' active' : '');
+
+    let label = tab.connName;
+    if (counts.get(tab.connId) > 1) {
+      const idx = (seenIndex.get(tab.connId) || 0) + 1;
+      seenIndex.set(tab.connId, idx);
+      label = `${tab.connName} (${idx})`;
+    }
+
     el.innerHTML = `
-      <span class="tab-name">${escapeHtml(tab.connName)}</span>
+      <span class="tab-name">${escapeHtml(label)}</span>
       <span class="tab-close" title="Close tab">&times;</span>
     `;
     el.addEventListener('click', (e) => {
@@ -438,14 +596,1173 @@ async function spawnTabTerminal(tab) {
 
   // Read-only terminal — only Ctrl+C passes through
   tab.terminal.onData((data) => {
-    if (data === '\x03') window.api.writePty(tab.connId, data);
+    if (data === '\x03') window.api.writePty(tab.ptyId, data);
   });
 
-  tab.terminal.onResize(({ cols, rows }) => window.api.resizePty(tab.connId, cols, rows));
+  tab.terminal.onResize(({ cols, rows }) => window.api.resizePty(tab.ptyId, cols, rows));
 
-  await window.api.spawnPty(tab.connId, tab.connection);
+  await window.api.spawnPty(tab.ptyId, tab.connection);
   updateConnectionStatus(tab.connId, true);
 }
+
+// ---- Snippets ----
+let activeSnippets = null; // will be loaded from file or fallback to built-in
+
+const BUILTIN_SNIPPETS = [
+  {
+    category: 'Locks & Blocking',
+    queries: [
+      {
+        name: 'Who blocks who',
+        desc: 'Show blocking and blocked queries with PIDs',
+        sql: `SELECT
+  blocked_locks.pid AS blocked_pid,
+  blocked_activity.usename AS blocked_user,
+  blocking_locks.pid AS blocking_pid,
+  blocking_activity.usename AS blocking_user,
+  blocked_activity.query AS blocked_query,
+  blocking_activity.query AS blocking_query,
+  blocked_activity.wait_event_type,
+  now() - blocked_activity.query_start AS blocked_duration
+FROM pg_catalog.pg_locks blocked_locks
+JOIN pg_catalog.pg_stat_activity blocked_activity ON blocked_activity.pid = blocked_locks.pid
+JOIN pg_catalog.pg_locks blocking_locks
+  ON blocking_locks.locktype = blocked_locks.locktype
+  AND blocking_locks.database IS NOT DISTINCT FROM blocked_locks.database
+  AND blocking_locks.relation IS NOT DISTINCT FROM blocked_locks.relation
+  AND blocking_locks.page IS NOT DISTINCT FROM blocked_locks.page
+  AND blocking_locks.tuple IS NOT DISTINCT FROM blocked_locks.tuple
+  AND blocking_locks.virtualxid IS NOT DISTINCT FROM blocked_locks.virtualxid
+  AND blocking_locks.transactionid IS NOT DISTINCT FROM blocked_locks.transactionid
+  AND blocking_locks.classid IS NOT DISTINCT FROM blocked_locks.classid
+  AND blocking_locks.objid IS NOT DISTINCT FROM blocked_locks.objid
+  AND blocking_locks.objsubid IS NOT DISTINCT FROM blocked_locks.objsubid
+  AND blocking_locks.pid != blocked_locks.pid
+JOIN pg_catalog.pg_stat_activity blocking_activity ON blocking_activity.pid = blocking_locks.pid
+WHERE NOT blocked_locks.granted
+ORDER BY blocked_duration DESC`
+      },
+      {
+        name: 'Current locks',
+        desc: 'All locks currently held or awaited',
+        sql: `SELECT
+  l.pid,
+  a.usename,
+  l.locktype,
+  l.mode,
+  l.granted,
+  CASE WHEN l.relation IS NOT NULL THEN l.relation::regclass::text ELSE NULL END AS relation,
+  a.query,
+  now() - a.query_start AS duration
+FROM pg_locks l
+JOIN pg_stat_activity a ON a.pid = l.pid
+WHERE a.pid != pg_backend_pid()
+ORDER BY l.granted, a.query_start`
+      },
+    ]
+  },
+  {
+    category: 'Active Queries',
+    queries: [
+      {
+        name: 'Running queries',
+        desc: 'All currently executing queries with duration',
+        sql: `SELECT
+  pid,
+  usename,
+  datname,
+  state,
+  wait_event_type,
+  wait_event,
+  now() - query_start AS duration,
+  query
+FROM pg_stat_activity
+WHERE state != 'idle'
+  AND pid != pg_backend_pid()
+ORDER BY query_start`
+      },
+      {
+        name: 'Long running queries (> 1min)',
+        desc: 'Queries running for more than 1 minute',
+        sql: `SELECT
+  pid,
+  usename,
+  datname,
+  state,
+  now() - query_start AS duration,
+  wait_event_type,
+  query
+FROM pg_stat_activity
+WHERE state != 'idle'
+  AND now() - query_start > interval '1 minute'
+  AND pid != pg_backend_pid()
+ORDER BY query_start`
+      },
+      {
+        name: 'Idle in transaction',
+        desc: 'Connections stuck in "idle in transaction" state',
+        sql: `SELECT
+  pid,
+  usename,
+  datname,
+  now() - state_change AS idle_duration,
+  now() - xact_start AS xact_duration,
+  query
+FROM pg_stat_activity
+WHERE state = 'idle in transaction'
+ORDER BY xact_start`
+      },
+    ]
+  },
+  {
+    category: 'Index Health',
+    queries: [
+      {
+        name: 'Index bloat estimation',
+        desc: 'Estimate bloat ratio for all indexes',
+        sql: `SELECT
+  schemaname || '.' || tablename AS table,
+  indexname AS index,
+  pg_size_pretty(pg_relation_size(indexrelid)) AS index_size,
+  idx_scan AS scans,
+  idx_tup_read AS tuples_read,
+  idx_tup_fetch AS tuples_fetched
+FROM pg_stat_user_indexes
+JOIN pg_index USING (indexrelid)
+ORDER BY pg_relation_size(indexrelid) DESC
+LIMIT 30`
+      },
+      {
+        name: 'Unused indexes',
+        desc: 'Indexes that have never been scanned',
+        sql: `SELECT
+  schemaname || '.' || relname AS table,
+  indexrelname AS index,
+  pg_size_pretty(pg_relation_size(i.indexrelid)) AS size,
+  idx_scan AS scans
+FROM pg_stat_user_indexes ui
+JOIN pg_index i ON ui.indexrelid = i.indexrelid
+WHERE idx_scan = 0
+  AND NOT indisunique
+  AND NOT indisprimary
+ORDER BY pg_relation_size(i.indexrelid) DESC`
+      },
+      {
+        name: 'Duplicate indexes',
+        desc: 'Indexes with identical column definitions',
+        sql: `SELECT
+  pg_size_pretty(sum(pg_relation_size(idx))::bigint) AS total_size,
+  array_agg(idx::regclass::text) AS indexes,
+  (array_agg(indrelid))[1]::regclass AS table
+FROM (
+  SELECT indexrelid AS idx, indrelid, indkey
+  FROM pg_index
+  WHERE indrelid::regclass::text NOT LIKE 'pg_%'
+) sub
+GROUP BY indrelid, indkey
+HAVING count(*) > 1
+ORDER BY sum(pg_relation_size(idx)) DESC`
+      },
+    ]
+  },
+  {
+    category: 'Table Stats',
+    queries: [
+      {
+        name: 'Table sizes',
+        desc: 'All tables sorted by total size (table + indexes + toast)',
+        sql: `SELECT
+  schemaname || '.' || relname AS table,
+  pg_size_pretty(pg_total_relation_size(relid)) AS total_size,
+  pg_size_pretty(pg_relation_size(relid)) AS table_size,
+  pg_size_pretty(pg_total_relation_size(relid) - pg_relation_size(relid)) AS indexes_toast,
+  n_live_tup AS live_rows,
+  n_dead_tup AS dead_rows,
+  CASE WHEN n_live_tup > 0
+    THEN round(100.0 * n_dead_tup / n_live_tup, 1)
+    ELSE 0
+  END AS dead_ratio_pct
+FROM pg_stat_user_tables
+ORDER BY pg_total_relation_size(relid) DESC
+LIMIT 30`
+      },
+      {
+        name: 'Table bloat (dead tuples)',
+        desc: 'Tables with highest dead tuple ratio — candidates for VACUUM',
+        sql: `SELECT
+  schemaname || '.' || relname AS table,
+  n_live_tup AS live_rows,
+  n_dead_tup AS dead_rows,
+  CASE WHEN n_live_tup > 0
+    THEN round(100.0 * n_dead_tup / n_live_tup, 1)
+    ELSE 0
+  END AS dead_ratio_pct,
+  last_vacuum,
+  last_autovacuum,
+  last_analyze,
+  last_autoanalyze
+FROM pg_stat_user_tables
+WHERE n_dead_tup > 0
+ORDER BY n_dead_tup DESC
+LIMIT 30`
+      },
+      {
+        name: 'Sequential scan heavy tables',
+        desc: 'Tables with most sequential scans vs index scans',
+        sql: `SELECT
+  schemaname || '.' || relname AS table,
+  seq_scan,
+  seq_tup_read,
+  idx_scan,
+  CASE WHEN (seq_scan + idx_scan) > 0
+    THEN round(100.0 * seq_scan / (seq_scan + idx_scan), 1)
+    ELSE 0
+  END AS seq_pct,
+  pg_size_pretty(pg_relation_size(relid)) AS size
+FROM pg_stat_user_tables
+WHERE seq_scan + idx_scan > 0
+ORDER BY seq_scan DESC
+LIMIT 30`
+      },
+    ]
+  },
+  {
+    category: 'Connections & Server',
+    queries: [
+      {
+        name: 'Connection count by state',
+        desc: 'Number of connections grouped by state and user',
+        sql: `SELECT
+  usename,
+  datname,
+  state,
+  count(*) AS connections,
+  max(now() - state_change) AS max_idle_time
+FROM pg_stat_activity
+GROUP BY usename, datname, state
+ORDER BY connections DESC`
+      },
+      {
+        name: 'Connection limits',
+        desc: 'Current connections vs max_connections',
+        sql: `SELECT
+  current_setting('max_connections')::int AS max_connections,
+  (SELECT count(*) FROM pg_stat_activity) AS current_connections,
+  (SELECT count(*) FROM pg_stat_activity WHERE state = 'active') AS active,
+  (SELECT count(*) FROM pg_stat_activity WHERE state = 'idle') AS idle,
+  (SELECT count(*) FROM pg_stat_activity WHERE state = 'idle in transaction') AS idle_in_transaction`
+      },
+      {
+        name: 'Database sizes',
+        desc: 'Size of each database on this server',
+        sql: `SELECT
+  datname,
+  pg_size_pretty(pg_database_size(datname)) AS size
+FROM pg_database
+WHERE datistemplate = false
+ORDER BY pg_database_size(datname) DESC`
+      },
+    ]
+  },
+  {
+    category: 'Replication',
+    queries: [
+      {
+        name: 'Replication status',
+        desc: 'Streaming replication lag and state',
+        sql: `SELECT
+  client_addr,
+  state,
+  sent_lsn,
+  write_lsn,
+  flush_lsn,
+  replay_lsn,
+  pg_size_pretty(pg_wal_lsn_diff(sent_lsn, replay_lsn)) AS replay_lag,
+  sync_state
+FROM pg_stat_replication`
+      },
+    ]
+  },
+  {
+    category: 'Cache & Performance',
+    queries: [
+      {
+        name: 'Cache hit ratio',
+        desc: 'Buffer cache hit ratio — should be > 99%',
+        sql: `SELECT
+  datname,
+  blks_hit,
+  blks_read,
+  CASE WHEN blks_hit + blks_read > 0
+    THEN round(100.0 * blks_hit / (blks_hit + blks_read), 2)
+    ELSE 0
+  END AS cache_hit_ratio
+FROM pg_stat_database
+WHERE datname = current_database()`
+      },
+      {
+        name: 'Table cache hit ratio',
+        desc: 'Per-table cache hit ratio',
+        sql: `SELECT
+  schemaname || '.' || relname AS table,
+  heap_blks_hit,
+  heap_blks_read,
+  CASE WHEN heap_blks_hit + heap_blks_read > 0
+    THEN round(100.0 * heap_blks_hit / (heap_blks_hit + heap_blks_read), 2)
+    ELSE 0
+  END AS hit_ratio,
+  pg_size_pretty(pg_relation_size(relid)) AS size
+FROM pg_statio_user_tables
+WHERE heap_blks_hit + heap_blks_read > 0
+ORDER BY heap_blks_read DESC
+LIMIT 30`
+      },
+    ]
+  },
+];
+
+const btnSnippets = document.getElementById('btn-snippets');
+const snippetsMenu = document.getElementById('snippets-menu');
+
+async function loadSnippetsFromFile() {
+  const saved = await window.api.loadSnippets();
+  activeSnippets = saved || BUILTIN_SNIPPETS;
+  buildSnippetsMenu();
+}
+
+function buildSnippetsMenu() {
+  snippetsMenu.innerHTML = '';
+
+  for (const cat of activeSnippets) {
+    const catEl = document.createElement('div');
+    catEl.className = 'snippets-category';
+    catEl.textContent = cat.category;
+    snippetsMenu.appendChild(catEl);
+
+    for (const q of cat.queries) {
+      const item = document.createElement('div');
+      item.className = 'snippet-item';
+      item.innerHTML = `<span class="snippet-name">${escapeHtml(q.name)}</span><span class="snippet-desc">${escapeHtml(q.desc)}</span>`;
+      item.addEventListener('click', () => {
+        loadSnippet(q.sql);
+        snippetsMenu.classList.add('hidden');
+      });
+      snippetsMenu.appendChild(item);
+    }
+  }
+
+  // Separator + edit button
+  const sep = document.createElement('div');
+  sep.className = 'snippets-category';
+  sep.style.borderTop = '1px solid var(--border)';
+  sep.innerHTML = '&nbsp;';
+  snippetsMenu.appendChild(sep);
+
+  const editItem = document.createElement('div');
+  editItem.className = 'snippet-item snippet-edit-btn';
+  editItem.innerHTML = `<span class="snippet-name">Edit snippets file...</span><span class="snippet-desc">Open the JSON file in your editor to add/modify snippets</span>`;
+  editItem.addEventListener('click', async () => {
+    snippetsMenu.classList.add('hidden');
+    const result = await window.api.openSnippetsInEditor();
+    if (result.needsInit) {
+      await window.api.saveSnippets(BUILTIN_SNIPPETS);
+      await window.api.openSnippetsInEditor();
+    }
+  });
+  snippetsMenu.appendChild(editItem);
+
+  const reloadItem = document.createElement('div');
+  reloadItem.className = 'snippet-item';
+  reloadItem.innerHTML = `<span class="snippet-name">Reload snippets</span><span class="snippet-desc">Reload after editing the file</span>`;
+  reloadItem.addEventListener('click', async () => {
+    snippetsMenu.classList.add('hidden');
+    await loadSnippetsFromFile();
+  });
+  snippetsMenu.appendChild(reloadItem);
+}
+
+function loadSnippet(sql) {
+  const tab = getActiveTab();
+  if (!tab?.editorView) return;
+  tab.editorView.dispatch({
+    changes: { from: 0, to: tab.editorView.state.doc.length, insert: sql.trim() },
+  });
+  tab.editorView.focus();
+}
+
+btnSnippets.addEventListener('click', (e) => {
+  e.stopPropagation();
+  snippetsMenu.classList.toggle('hidden');
+});
+
+// Close menu on click outside
+document.addEventListener('click', (e) => {
+  if (!snippetsMenu.contains(e.target) && e.target !== btnSnippets) {
+    snippetsMenu.classList.add('hidden');
+  }
+});
+
+loadSnippetsFromFile();
+
+// ---- ERD Schema Viewer ----
+const erdOverlay = document.getElementById('erd-overlay');
+const erdCanvas = document.getElementById('erd-canvas');
+const erdLines = document.getElementById('erd-lines');
+const erdViewport = document.getElementById('erd-viewport');
+const erdStatus = document.getElementById('erd-status');
+const btnSchema = document.getElementById('btn-schema');
+const btnErdClose = document.getElementById('erd-close');
+const btnErdZoomReset = document.getElementById('erd-zoom-reset');
+
+let erdState = { scale: 1, tx: 0, ty: 0, tables: [], fks: [] };
+
+btnSchema.addEventListener('click', openERD);
+btnErdClose.addEventListener('click', closeERD);
+btnErdZoomReset.addEventListener('click', () => fitERDToView());
+
+const btnErdCompact = document.getElementById('erd-compact');
+const btnErdSpread = document.getElementById('erd-spread-btn');
+
+function spreadERD(factor) {
+  const tables = erdCanvas.querySelectorAll('.erd-table');
+  if (!tables.length) return;
+
+  // Find center of all tables
+  let cx = 0, cy = 0;
+  const positions = [];
+  for (const el of tables) {
+    const x = parseFloat(el.style.left) || 0;
+    const y = parseFloat(el.style.top) || 0;
+    positions.push({ el, x, y });
+    cx += x;
+    cy += y;
+  }
+  cx /= tables.length;
+  cy /= tables.length;
+
+  // Scale positions from center
+  for (const p of positions) {
+    p.el.style.left = (cx + (p.x - cx) * factor) + 'px';
+    p.el.style.top = (cy + (p.y - cy) * factor) + 'px';
+  }
+
+  // Resize schema zones to fit
+  const zones = erdCanvas.querySelectorAll('.erd-schema-zone');
+  for (const zone of zones) {
+    const zx = parseFloat(zone.style.left) || 0;
+    const zy = parseFloat(zone.style.top) || 0;
+    const zw = parseFloat(zone.style.width) || 0;
+    const zh = parseFloat(zone.style.height) || 0;
+    const zcx = zx + zw / 2;
+    const zcy = zy + zh / 2;
+    zone.style.left = (cx + (zcx - cx) * factor - zw * factor / 2) + 'px';
+    zone.style.top = (cy + (zcy - cy) * factor - zh * factor / 2) + 'px';
+    zone.style.width = (zw * factor) + 'px';
+    zone.style.height = (zh * factor) + 'px';
+  }
+
+  updateERDLines();
+}
+
+btnErdSpread.addEventListener('click', () => { spreadERD(1.2); fitERDToView(); });
+btnErdCompact.addEventListener('click', () => { spreadERD(0.8); fitERDToView(); });
+
+function fitERDToView() {
+  requestAnimationFrame(() => {
+    // Measure total content bounds
+    const allEls = erdCanvas.querySelectorAll('.erd-table, .erd-schema-zone');
+    if (!allEls.length) return;
+
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const el of allEls) {
+      const left = parseFloat(el.style.left) || 0;
+      const top = parseFloat(el.style.top) || 0;
+      const w = el.offsetWidth || parseFloat(el.style.width) || 0;
+      const h = el.offsetHeight || parseFloat(el.style.height) || 0;
+      minX = Math.min(minX, left);
+      minY = Math.min(minY, top);
+      maxX = Math.max(maxX, left + w);
+      maxY = Math.max(maxY, top + h);
+    }
+
+    const contentW = maxX - minX;
+    const contentH = maxY - minY;
+    const vpRect = erdViewport.getBoundingClientRect();
+    const margin = 40;
+
+    const scaleX = (vpRect.width - margin * 2) / contentW;
+    const scaleY = (vpRect.height - margin * 2) / contentH;
+    erdState.scale = Math.min(1, Math.min(scaleX, scaleY));
+
+    erdState.tx = margin + (vpRect.width - margin * 2 - contentW * erdState.scale) / 2 - minX * erdState.scale;
+    erdState.ty = margin + (vpRect.height - margin * 2 - contentH * erdState.scale) / 2 - minY * erdState.scale;
+
+    applyERDTransform();
+    updateERDLines();
+  });
+}
+
+async function openERD() {
+  const tab = getActiveTab();
+  if (!tab) return;
+
+  erdOverlay.classList.remove('hidden');
+  erdCanvas.innerHTML = '';
+  erdLines.innerHTML = '';
+  erdStatus.textContent = 'Loading schema...';
+
+  const sf = (alias) => `${alias} NOT IN ('information_schema') AND ${alias} NOT LIKE 'pg\\_%'`;
+
+  const schemaQuery = `
+    SELECT
+      c.table_schema,
+      c.table_name,
+      c.column_name,
+      c.data_type,
+      c.ordinal_position,
+      c.character_maximum_length,
+      c.is_nullable
+    FROM information_schema.columns c
+    JOIN information_schema.tables t
+      ON c.table_schema = t.table_schema AND c.table_name = t.table_name
+    WHERE ${sf('c.table_schema')} AND t.table_type = 'BASE TABLE'
+    ORDER BY c.table_schema, c.table_name, c.ordinal_position
+  `;
+
+  const pkQuery = `
+    SELECT tc.table_schema, kcu.table_name, kcu.column_name
+    FROM information_schema.table_constraints tc
+    JOIN information_schema.key_column_usage kcu
+      ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
+    WHERE tc.constraint_type = 'PRIMARY KEY' AND ${sf('tc.table_schema')}
+  `;
+
+  const fkQuery = `
+    SELECT
+      kcu.table_schema AS from_schema,
+      kcu.table_name AS from_table,
+      kcu.column_name AS from_column,
+      ccu.table_schema AS to_schema,
+      ccu.table_name AS to_table,
+      ccu.column_name AS to_column
+    FROM information_schema.table_constraints tc
+    JOIN information_schema.key_column_usage kcu
+      ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
+    JOIN information_schema.constraint_column_usage ccu
+      ON tc.constraint_name = ccu.constraint_name AND tc.table_schema = ccu.table_schema
+    WHERE tc.constraint_type = 'FOREIGN KEY' AND ${sf('tc.table_schema')}
+  `;
+
+  const [colResult, pkResult, fkResult] = await Promise.all([
+    window.api.executeQuery(tab.connection, schemaQuery),
+    window.api.executeQuery(tab.connection, pkQuery),
+    window.api.executeQuery(tab.connection, fkQuery),
+  ]);
+
+  if (colResult.error) {
+    erdStatus.textContent = 'Error: ' + colResult.error;
+    return;
+  }
+
+  // Parse columns into tables (keyed by schema.table)
+  const tables = new Map();
+  const schemas = new Set();
+  for (const row of (colResult.rows || [])) {
+    const [schemaName, tableName, colName, dataType, , maxLen, nullable] = row;
+    const key = `${schemaName}.${tableName}`;
+    schemas.add(schemaName);
+    if (!tables.has(key)) tables.set(key, { name: tableName, schema: schemaName, key, columns: [] });
+    let typeStr = dataType;
+    if (maxLen) typeStr += `(${maxLen})`;
+    tables.get(key).columns.push({ name: colName, type: typeStr, pk: false, fk: false, nullable: nullable === 'YES' });
+  }
+
+  // Show schema prefix only if there are multiple schemas
+  const multiSchema = schemas.size > 1;
+
+  // Mark PKs
+  for (const row of (pkResult.rows || [])) {
+    const [schemaName, tableName, colName] = row;
+    const t = tables.get(`${schemaName}.${tableName}`);
+    if (t) {
+      const col = t.columns.find(c => c.name === colName);
+      if (col) col.pk = true;
+    }
+  }
+
+  // Parse FKs
+  const fks = [];
+  for (const row of (fkResult.rows || [])) {
+    const [fromSchema, fromTable, fromCol, toSchema, toTable, toCol] = row;
+    const fromKey = `${fromSchema}.${fromTable}`;
+    const toKey = `${toSchema}.${toTable}`;
+    fks.push({ fromTable: fromKey, fromCol, toTable: toKey, toCol });
+    const t = tables.get(fromKey);
+    if (t) {
+      const col = t.columns.find(c => c.name === fromCol);
+      if (col) { col.fk = true; col.fkRef = `${toTable}.${toCol}`; }
+    }
+  }
+
+  erdState.tables = [...tables.values()];
+  erdState.fks = fks;
+  erdState.multiSchema = multiSchema;
+  erdState.scale = 1;
+  erdState.tx = 20;
+  erdState.ty = 20;
+
+  const schemaInfo = multiSchema ? ` across ${schemas.size} schemas` : '';
+  erdStatus.textContent = `${tables.size} tables, ${fks.length} foreign keys${schemaInfo}`;
+  renderERD();
+  fitERDToView();
+}
+
+function closeERD() {
+  erdOverlay.classList.add('hidden');
+  closeERDDetail();
+}
+
+function estimateTableHeight(table, colsPerTable) {
+  const shown = Math.min(table.columns.length, colsPerTable);
+  return 30 + shown * 22 + (table.columns.length > colsPerTable ? 22 : 0);
+}
+
+function forceDirectedLayout(tables, fks, tableWidth, colsPerTable) {
+  // Initialize positions in a circle
+  const nodes = tables.map((t, i) => {
+    const angle = (2 * Math.PI * i) / tables.length;
+    const radius = Math.max(200, tables.length * 25);
+    return {
+      key: t.key,
+      table: t,
+      x: radius * Math.cos(angle),
+      y: radius * Math.sin(angle),
+      w: tableWidth,
+      h: estimateTableHeight(t, colsPerTable),
+      vx: 0,
+      vy: 0,
+    };
+  });
+
+  if (nodes.length <= 1) {
+    if (nodes.length === 1) { nodes[0].x = 0; nodes[0].y = 0; }
+    return nodes;
+  }
+
+  const nodeMap = new Map(nodes.map(n => [n.key, n]));
+
+  // Build edge list (within this group)
+  const edges = [];
+  for (const fk of fks) {
+    const from = nodeMap.get(fk.fromTable);
+    const to = nodeMap.get(fk.toTable);
+    if (from && to && from !== to) edges.push({ from, to });
+  }
+
+  const iterations = 300;
+  const idealDist = 190;
+  const repulsion = 40000;
+  const attraction = 0.006;
+  const damping = 0.85;
+  const minDist = 20;
+
+  // Identify which nodes have edges
+  const hasEdge = new Set();
+  for (const edge of edges) { hasEdge.add(edge.from.key); hasEdge.add(edge.to.key); }
+
+  for (let iter = 0; iter < iterations; iter++) {
+    const temp = 1 - iter / iterations; // cooling
+
+    // Gravity toward center (stronger for orphan nodes)
+    let cx = 0, cy = 0;
+    for (const n of nodes) { cx += n.x; cy += n.y; }
+    cx /= nodes.length;
+    cy /= nodes.length;
+    for (const n of nodes) {
+      const gravity = hasEdge.has(n.key) ? 0.002 : 0.01;
+      n.vx += (cx - n.x) * gravity * temp;
+      n.vy += (cy - n.y) * gravity * temp;
+    }
+
+    // Repulsion between all pairs
+    for (let i = 0; i < nodes.length; i++) {
+      for (let j = i + 1; j < nodes.length; j++) {
+        const a = nodes[i], b = nodes[j];
+        let dx = b.x - a.x;
+        let dy = b.y - a.y;
+        let dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < minDist) { dist = minDist; dx = minDist; dy = 0; }
+
+        const force = repulsion / (dist * dist);
+        const fx = (dx / dist) * force * temp;
+        const fy = (dy / dist) * force * temp;
+
+        a.vx -= fx;
+        a.vy -= fy;
+        b.vx += fx;
+        b.vy += fy;
+      }
+    }
+
+    // Attraction along edges
+    for (const edge of edges) {
+      const dx = edge.to.x - edge.from.x;
+      const dy = edge.to.y - edge.from.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist < 1) continue;
+
+      const force = attraction * (dist - idealDist) * temp;
+      const fx = (dx / dist) * force;
+      const fy = (dy / dist) * force;
+
+      edge.from.vx += fx;
+      edge.from.vy += fy;
+      edge.to.vx -= fx;
+      edge.to.vy -= fy;
+    }
+
+    // Overlap repulsion (rectangle-aware)
+    for (let i = 0; i < nodes.length; i++) {
+      for (let j = i + 1; j < nodes.length; j++) {
+        const a = nodes[i], b = nodes[j];
+        const overlapX = (a.w / 2 + b.w / 2 + 20) - Math.abs(b.x - a.x);
+        const overlapY = (a.h / 2 + b.h / 2 + 20) - Math.abs(b.y - a.y);
+        if (overlapX > 0 && overlapY > 0) {
+          const pushX = overlapX * 0.5 * temp;
+          const pushY = overlapY * 0.5 * temp;
+          if (overlapX < overlapY) {
+            const sign = b.x >= a.x ? 1 : -1;
+            a.vx -= sign * pushX;
+            b.vx += sign * pushX;
+          } else {
+            const sign = b.y >= a.y ? 1 : -1;
+            a.vy -= sign * pushY;
+            b.vy += sign * pushY;
+          }
+        }
+      }
+    }
+
+    // Apply velocities
+    for (const n of nodes) {
+      n.vx *= damping;
+      n.vy *= damping;
+      n.x += n.vx;
+      n.y += n.vy;
+    }
+  }
+
+  // Normalize: shift so min x/y is 0
+  let minX = Infinity, minY = Infinity;
+  for (const n of nodes) { minX = Math.min(minX, n.x); minY = Math.min(minY, n.y); }
+  for (const n of nodes) { n.x -= minX; n.y -= minY; }
+
+  return nodes;
+}
+
+function renderERD() {
+  erdCanvas.innerHTML = '';
+  erdLines.innerHTML = '';
+  erdState.schemaZones = [];
+
+  const tableEls = new Map();
+  const colsPerTable = 20;
+  const tableWidth = 220;
+  const schemaPadding = 20;
+  const schemaPaddingTop = 36;
+  const schemaGap = 40;
+
+  // Group tables by schema
+  const schemaGroups = new Map();
+  for (const table of erdState.tables) {
+    if (!schemaGroups.has(table.schema)) schemaGroups.set(table.schema, []);
+    schemaGroups.get(table.schema).push(table);
+  }
+
+  let globalY = 0;
+
+  for (const [schemaName, tables] of schemaGroups) {
+    // Run force-directed layout for this schema group
+    const schemaFks = erdState.fks.filter(fk =>
+      tables.some(t => t.key === fk.fromTable) || tables.some(t => t.key === fk.toTable)
+    );
+    const nodes = forceDirectedLayout(tables, schemaFks, tableWidth, colsPerTable);
+
+    // Render tables at computed positions
+    let maxX = 0, maxY = 0;
+
+    for (const node of nodes) {
+      const table = node.table;
+      const posX = schemaPadding + node.x;
+      const posY = globalY + schemaPaddingTop + node.y;
+
+      const el = document.createElement('div');
+      el.className = 'erd-table';
+      el.style.left = posX + 'px';
+      el.style.top = posY + 'px';
+      el.style.width = tableWidth + 'px';
+
+      const header = document.createElement('div');
+      header.className = 'erd-table-header';
+      header.textContent = table.name;
+      el.appendChild(header);
+
+      const shownCols = table.columns.slice(0, colsPerTable);
+      for (const c of shownCols) {
+        const colEl = document.createElement('div');
+        colEl.className = 'erd-column';
+        if (c.pk) colEl.classList.add('is-pk');
+        if (c.fk) colEl.classList.add('is-fk');
+        colEl.setAttribute('data-table', table.key);
+        colEl.setAttribute('data-column', c.name);
+
+        let badges = '';
+        if (c.pk) badges += '<span class="col-badge pk">PK</span>';
+        if (c.fk) badges += '<span class="col-badge fk">FK</span>';
+
+        colEl.innerHTML = `${badges}<span class="col-name">${escapeHtml(c.name)}</span><span class="col-type">${escapeHtml(c.type)}</span>`;
+        if (c.fkRef) colEl.title = `\u2192 ${c.fkRef}`;
+        el.appendChild(colEl);
+      }
+
+      if (table.columns.length > colsPerTable) {
+        const more = document.createElement('div');
+        more.className = 'erd-column';
+        more.innerHTML = `<span class="col-name" style="color:var(--text-dim)">... ${table.columns.length - colsPerTable} more</span>`;
+        el.appendChild(more);
+      }
+
+      erdCanvas.appendChild(el);
+      tableEls.set(table.key, el);
+      makeERDDraggable(el, header, table);
+
+      maxX = Math.max(maxX, node.x + tableWidth);
+      maxY = Math.max(maxY, node.y + node.h);
+    }
+
+    // Schema background zone
+    const zone = document.createElement('div');
+    zone.className = 'erd-schema-zone';
+    zone.style.left = '0px';
+    zone.style.top = globalY + 'px';
+    zone.style.width = (maxX + schemaPadding * 2) + 'px';
+    zone.style.height = (maxY + schemaPaddingTop + schemaPadding) + 'px';
+
+    const label = document.createElement('div');
+    label.className = 'erd-schema-label';
+    label.textContent = schemaName;
+    zone.appendChild(label);
+
+    erdCanvas.insertBefore(zone, erdCanvas.firstChild);
+
+    // Store zone bounds for nav
+    if (!erdState.schemaZones) erdState.schemaZones = [];
+    erdState.schemaZones.push({
+      name: schemaName,
+      x: 0,
+      y: globalY,
+      w: maxX + schemaPadding * 2,
+      h: maxY + schemaPaddingTop + schemaPadding,
+      tableCount: tables.length,
+    });
+
+    globalY += maxY + schemaPaddingTop + schemaPadding + schemaGap;
+  }
+
+  erdState.tableEls = tableEls;
+  applyERDTransform();
+  buildSchemaNav();
+  requestAnimationFrame(() => updateERDLines());
+}
+
+const erdSchemaNav = document.getElementById('erd-schema-nav');
+
+function buildSchemaNav() {
+  erdSchemaNav.innerHTML = '';
+  if (!erdState.schemaZones || erdState.schemaZones.length <= 1) return;
+
+  for (const zone of erdState.schemaZones) {
+    const btn = document.createElement('button');
+    btn.className = 'erd-nav-item';
+    btn.innerHTML = `${escapeHtml(zone.name)}<span class="nav-count">(${zone.tableCount})</span>`;
+    btn.addEventListener('click', () => focusSchema(zone));
+    erdSchemaNav.appendChild(btn);
+  }
+}
+
+function focusSchema(zone) {
+  const vpRect = erdViewport.getBoundingClientRect();
+  const margin = 30;
+
+  const scaleX = (vpRect.width - margin * 2) / zone.w;
+  const scaleY = (vpRect.height - margin * 2) / zone.h;
+  erdState.scale = Math.min(1, Math.min(scaleX, scaleY));
+
+  erdState.tx = margin + (vpRect.width - margin * 2 - zone.w * erdState.scale) / 2 - zone.x * erdState.scale;
+  erdState.ty = margin + (vpRect.height - margin * 2 - zone.h * erdState.scale) / 2 - zone.y * erdState.scale;
+
+  applyERDTransform();
+  updateERDLines();
+}
+
+// ---- ERD table detail panel ----
+const erdDetail = document.getElementById('erd-detail');
+
+function closeERDDetail() {
+  erdDetail.classList.add('hidden');
+}
+
+async function showTableDetail(table) {
+  const tab = getActiveTab();
+  if (!tab) return;
+
+  erdDetail.classList.remove('hidden');
+  erdDetail.innerHTML = `
+    <div class="erd-detail-header">
+      <h3>${escapeHtml(table.schema)}.${escapeHtml(table.name)}</h3>
+      <button class="erd-detail-close" title="Close">&times;</button>
+    </div>
+    <div class="erd-detail-body">
+      <div class="erd-detail-section">
+        <div class="erd-detail-section-title">Indexes</div>
+        <div class="erd-detail-empty">Loading...</div>
+      </div>
+    </div>
+  `;
+
+  erdDetail.querySelector('.erd-detail-close').addEventListener('click', closeERDDetail);
+
+  const schemaLit = `'${table.schema.replace(/'/g, "''")}'`;
+  const tableLit = `'${table.name.replace(/'/g, "''")}'`;
+
+  const indexQuery = `
+    SELECT
+      i.relname AS index_name,
+      am.amname AS index_type,
+      ix.indisunique AS is_unique,
+      ix.indisprimary AS is_primary,
+      pg_get_indexdef(ix.indexrelid) AS index_def,
+      pg_size_pretty(pg_relation_size(ix.indexrelid)) AS index_size
+    FROM pg_index ix
+    JOIN pg_class t ON t.oid = ix.indrelid
+    JOIN pg_class i ON i.oid = ix.indexrelid
+    JOIN pg_am am ON am.oid = i.relam
+    JOIN pg_namespace n ON n.oid = t.relnamespace
+    WHERE n.nspname = ${schemaLit}
+      AND t.relname = ${tableLit}
+    ORDER BY ix.indisprimary DESC, ix.indisunique DESC, i.relname
+  `;
+
+  const ownerQuery = `
+    SELECT tableowner FROM pg_tables
+    WHERE schemaname = ${schemaLit} AND tablename = ${tableLit}
+  `;
+
+  const [result, ownerResult] = await Promise.all([
+    window.api.executeQuery(tab.connection, indexQuery),
+    window.api.executeQuery(tab.connection, ownerQuery),
+  ]);
+
+  const body = erdDetail.querySelector('.erd-detail-body');
+  if (!body) return;
+
+  const owner = ownerResult.rows?.[0]?.[0];
+  const ownerHtml = owner
+    ? `<div class="erd-detail-meta">Owner: <span class="erd-detail-meta-value">${escapeHtml(owner)}</span></div>`
+    : '';
+
+  let indexHtml = '<div class="erd-detail-section"><div class="erd-detail-section-title">Indexes</div>';
+
+  if (result.error) {
+    indexHtml += `<div class="erd-detail-empty">Error: ${escapeHtml(result.error)}</div>`;
+  } else if (!result.rows || result.rows.length === 0) {
+    indexHtml += '<div class="erd-detail-empty">No indexes</div>';
+  } else {
+    for (const row of result.rows) {
+      const [name, type, isUnique, isPrimary, def, size] = row;
+      let badges = '';
+      if (isPrimary === 't' || isPrimary === true) badges += '<span class="erd-detail-index-badge primary">PK</span>';
+      else if (isUnique === 't' || isUnique === true) badges += '<span class="erd-detail-index-badge unique">Unique</span>';
+      badges += `<span class="erd-detail-index-badge ${type}">${escapeHtml(type)}</span>`;
+
+      // Extract columns from the def (between parentheses)
+      const colMatch = def.match(/\(([^)]+)\)/);
+      const cols = colMatch ? colMatch[1] : '';
+
+      indexHtml += `
+        <div class="erd-detail-index">
+          <div class="erd-detail-index-name">${escapeHtml(name)}</div>
+          <div class="erd-detail-index-info">${badges} <span style="font-size:10px;color:var(--text-dim)">${escapeHtml(size)}</span></div>
+          <div class="erd-detail-index-def">${escapeHtml(cols)}</div>
+        </div>
+      `;
+    }
+  }
+  indexHtml += '</div>';
+
+  // Also show columns summary
+  let colsHtml = '<div class="erd-detail-section"><div class="erd-detail-section-title">Columns</div>';
+  for (const col of table.columns) {
+    let badges = '';
+    if (col.pk) badges += '<span class="col-badge pk" style="font-size:9px">PK</span> ';
+    if (col.fk) badges += '<span class="col-badge fk" style="font-size:9px">FK</span> ';
+    const nullable = col.nullable ? '<span style="color:var(--text-dim);font-size:10px"> null</span>' : '';
+    colsHtml += `<div style="font-size:11px;font-family:var(--font-mono);padding:2px 0;display:flex;gap:4px;align-items:center">${badges}<span style="color:var(--text)">${escapeHtml(col.name)}</span> <span style="color:var(--text-dim);font-size:10px">${escapeHtml(col.type)}</span>${nullable}</div>`;
+  }
+  colsHtml += '</div>';
+
+  body.innerHTML = ownerHtml + indexHtml + colsHtml;
+}
+
+function makeERDDraggable(el, handle, table) {
+  let startX, startY, origLeft, origTop, hasMoved;
+
+  handle.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    startX = e.clientX;
+    startY = e.clientY;
+    origLeft = parseInt(el.style.left) || 0;
+    origTop = parseInt(el.style.top) || 0;
+    hasMoved = false;
+    handle.setPointerCapture(e.pointerId);
+
+    const onMove = (e) => {
+      const dx = (e.clientX - startX) / erdState.scale;
+      const dy = (e.clientY - startY) / erdState.scale;
+      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) hasMoved = true;
+      el.style.left = (origLeft + dx) + 'px';
+      el.style.top = (origTop + dy) + 'px';
+      updateERDLines();
+    };
+
+    const onUp = () => {
+      handle.removeEventListener('pointermove', onMove);
+      handle.removeEventListener('pointerup', onUp);
+      if (!hasMoved && table) showTableDetail(table);
+    };
+
+    handle.addEventListener('pointermove', onMove);
+    handle.addEventListener('pointerup', onUp);
+  });
+}
+
+function updateERDLines() {
+  erdLines.innerHTML = '';
+  const vpRect = erdViewport.getBoundingClientRect();
+
+  for (const fk of erdState.fks) {
+    const fromEl = erdCanvas.querySelector(`[data-table="${fk.fromTable}"][data-column="${fk.fromCol}"]`);
+    const toEl = erdCanvas.querySelector(`[data-table="${fk.toTable}"][data-column="${fk.toCol}"]`);
+    if (!fromEl || !toEl) continue;
+
+    const fromRect = fromEl.getBoundingClientRect();
+    const toRect = toEl.getBoundingClientRect();
+
+    const x1 = fromRect.right - vpRect.left;
+    const y1 = fromRect.top + fromRect.height / 2 - vpRect.top;
+    const x2 = toRect.left - vpRect.left;
+    const y2 = toRect.top + toRect.height / 2 - vpRect.top;
+
+    const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    line.setAttribute('x1', x1);
+    line.setAttribute('y1', y1);
+    line.setAttribute('x2', x2);
+    line.setAttribute('y2', y2);
+
+    const fromTableName = fk.fromTable;
+    const toTableName = fk.toTable;
+    line.addEventListener('mouseenter', () => {
+      line.classList.add('fk-line-hover');
+      erdState.tableEls?.get(fromTableName)?.style.setProperty('border-color', 'var(--accent)');
+      erdState.tableEls?.get(toTableName)?.style.setProperty('border-color', 'var(--accent)');
+    });
+    line.addEventListener('mouseleave', () => {
+      line.classList.remove('fk-line-hover');
+      erdState.tableEls?.get(fromTableName)?.style.removeProperty('border-color');
+      erdState.tableEls?.get(toTableName)?.style.removeProperty('border-color');
+    });
+    line.style.pointerEvents = 'stroke';
+    line.style.cursor = 'pointer';
+
+    erdLines.appendChild(line);
+  }
+}
+
+function applyERDTransform() {
+  erdCanvas.style.transform = `translate(${erdState.tx}px, ${erdState.ty}px) scale(${erdState.scale})`;
+}
+
+// Pan
+let isPanning = false, panStartX, panStartY, panStartTx, panStartTy;
+
+erdViewport.addEventListener('pointerdown', (e) => {
+  if (e.target !== erdViewport && e.target !== erdCanvas) return;
+  isPanning = true;
+  panStartX = e.clientX;
+  panStartY = e.clientY;
+  panStartTx = erdState.tx;
+  panStartTy = erdState.ty;
+  erdViewport.classList.add('grabbing');
+  erdViewport.setPointerCapture(e.pointerId);
+});
+
+erdViewport.addEventListener('pointermove', (e) => {
+  if (!isPanning) return;
+  erdState.tx = panStartTx + (e.clientX - panStartX);
+  erdState.ty = panStartTy + (e.clientY - panStartY);
+  applyERDTransform();
+  updateERDLines();
+});
+
+erdViewport.addEventListener('pointerup', () => {
+  isPanning = false;
+  erdViewport.classList.remove('grabbing');
+});
+
+// Zoom
+erdViewport.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  const delta = e.deltaY > 0 ? 0.9 : 1.1;
+  const newScale = Math.max(0.15, Math.min(3, erdState.scale * delta));
+
+  const rect = erdViewport.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const my = e.clientY - rect.top;
+  erdState.tx = mx - (mx - erdState.tx) * (newScale / erdState.scale);
+  erdState.ty = my - (my - erdState.ty) * (newScale / erdState.scale);
+  erdState.scale = newScale;
+
+  applyERDTransform();
+  updateERDLines();
+}, { passive: false });
+
+// ---- Import connections ----
+const btnImport = document.getElementById('btn-import');
+btnImport.addEventListener('click', async () => {
+  const result = await window.api.importConnections();
+  if (result.canceled) return;
+  if (result.error) {
+    alert(result.error);
+    return;
+  }
+  // Deduplicate by checking host+port+user+database
+  const existing = new Set(connections.map(c => `${c.host}:${c.port}/${c.database}@${c.user}`));
+  let added = 0;
+  for (const conn of result.connections) {
+    const key = `${conn.host}:${conn.port}/${conn.database}@${conn.user}`;
+    if (!existing.has(key)) {
+      connections.push(conn);
+      existing.add(key);
+      added++;
+    }
+  }
+  if (added > 0) {
+    await window.api.saveConnections(connections.map(sanitizeConn));
+    renderConnections();
+  }
+  alert(`${added} connection(s) imported (${result.count - added} duplicates skipped).`);
+});
 
 // ---- New connection dialog ----
 btnNewConn.addEventListener('click', () => {
@@ -488,7 +1805,9 @@ function getRawEditorContent() {
 }
 
 function hasMetacommand(q) {
-  return /\\[a-zA-Z+]/.test(q);
+  // psql metacommands must be at the start of a line (optionally preceded by whitespace)
+  // This avoids matching escape sequences like \t \n inside string literals
+  return /(^|\n)\s*\\[a-zA-Z+]/.test(q);
 }
 
 function getEditorContent() {
@@ -504,6 +1823,8 @@ async function runQuery() {
   const query = getEditorContent();
   if (!query) return;
 
+  addToHistory(getRawEditorContent());
+
   if (hasMetacommand(query)) {
     sendToTerminal();
     return;
@@ -513,7 +1834,26 @@ async function runQuery() {
   resultsStatus.textContent = '';
   resultsStatus.className = '';
 
-  const result = await window.api.executeQuery(tab.connection, query);
+  const queryId = crypto.randomUUID();
+  tab.currentQueryId = queryId;
+  const startDisplay = Date.now();
+  btnStop.classList.remove('hidden');
+  btnRun.classList.add('hidden');
+
+  const result = await window.api.executeQuery(tab.connection, query, queryId);
+
+  if (tab.currentQueryId === queryId) {
+    tab.currentQueryId = null;
+    // Keep stop button visible for at least 150ms so it's noticeable
+    const elapsed = Date.now() - startDisplay;
+    const remaining = Math.max(0, 150 - elapsed);
+    setTimeout(() => {
+      if (!tab.currentQueryId) {
+        btnStop.classList.add('hidden');
+        btnRun.classList.remove('hidden');
+      }
+    }, remaining);
+  }
 
   // Only update if still on the same tab
   if (getActiveTab()?.id !== tab.id) return;
@@ -548,11 +1888,15 @@ async function runQuery() {
 function showCopyButtons() {
   btnCopyCsv.classList.remove('hidden');
   btnCopyJson.classList.remove('hidden');
+  btnExportCsv.classList.remove('hidden');
+  btnExportJson.classList.remove('hidden');
 }
 
 function hideCopyButtons() {
   btnCopyCsv.classList.add('hidden');
   btnCopyJson.classList.add('hidden');
+  btnExportCsv.classList.add('hidden');
+  btnExportJson.classList.add('hidden');
 }
 
 function renderTable(columns, rows) {
@@ -630,16 +1974,74 @@ btnCopyJson.addEventListener('click', () => {
   copyWithFeedback(btnCopyJson, JSON.stringify(data, null, 2));
 });
 
+// ---- Export to file ----
+function buildCsvContent(tab) {
+  if (!tab?.lastResults) return '';
+  const lines = [tab.lastResults.columns.join(',')];
+  for (const row of tab.lastResults.rows) {
+    lines.push(row.map(cell => {
+      if (cell === null || cell === undefined || cell === '') return '';
+      const s = String(cell);
+      return s.includes(',') || s.includes('"') || s.includes('\n')
+        ? '"' + s.replace(/"/g, '""') + '"' : s;
+    }).join(','));
+  }
+  return lines.join('\n');
+}
+
+function buildJsonContent(tab) {
+  if (!tab?.lastResults) return '';
+  const data = tab.lastResults.rows.map(row => {
+    const obj = {};
+    tab.lastResults.columns.forEach((col, i) => {
+      obj[col] = (row[i] === '' || row[i] === undefined) ? null : row[i];
+    });
+    return obj;
+  });
+  return JSON.stringify(data, null, 2);
+}
+
+btnExportCsv.addEventListener('click', async () => {
+  const tab = getActiveTab();
+  if (!tab?.lastResults) return;
+  const content = buildCsvContent(tab);
+  const result = await window.api.exportSave({
+    content,
+    defaultName: 'results.csv',
+    filters: [{ name: 'CSV', extensions: ['csv'] }],
+  });
+  if (!result.canceled) copyWithFeedback(btnExportCsv, 'Saved!');
+});
+
+btnExportJson.addEventListener('click', async () => {
+  const tab = getActiveTab();
+  if (!tab?.lastResults) return;
+  const content = buildJsonContent(tab);
+  const result = await window.api.exportSave({
+    content,
+    defaultName: 'results.json',
+    filters: [{ name: 'JSON', extensions: ['json'] }],
+  });
+  if (!result.canceled) copyWithFeedback(btnExportJson, 'Saved!');
+});
+
 // ---- Send to terminal ----
 function sendToTerminal() {
   const tab = getActiveTab();
   if (!tab?.terminal) return;
   const query = getEditorContent();
   if (!query) return;
-  window.api.sendQuery(tab.connId, query);
+  addToHistory(getRawEditorContent());
+  window.api.sendQuery(tab.ptyId, query);
 }
 
 btnRun.addEventListener('click', runQuery);
+btnStop.addEventListener('click', () => {
+  const tab = getActiveTab();
+  if (tab?.currentQueryId) {
+    window.api.cancelQuery(tab.currentQueryId);
+  }
+});
 btnSendTerminal.addEventListener('click', sendToTerminal);
 btnClear.addEventListener('click', () => {
   const tab = getActiveTab();
@@ -649,24 +2051,81 @@ btnClear.addEventListener('click', () => {
   }
 });
 
+// ---- Auto-refresh ----
+const btnAutoRefresh = document.getElementById('btn-auto-refresh');
+const autoRefreshInterval = document.getElementById('auto-refresh-interval');
+let autoRefreshTimer = null;
+
+function stopAutoRefresh() {
+  if (autoRefreshTimer) {
+    clearInterval(autoRefreshTimer);
+    autoRefreshTimer = null;
+  }
+  btnAutoRefresh.classList.remove('active');
+  btnAutoRefresh.textContent = 'Auto';
+}
+
+function startAutoRefresh() {
+  const seconds = parseInt(autoRefreshInterval.value) || 5;
+  stopAutoRefresh();
+  btnAutoRefresh.classList.add('active');
+
+  let countdown = seconds;
+  btnAutoRefresh.textContent = `${countdown}s`;
+
+  autoRefreshTimer = setInterval(() => {
+    countdown--;
+    if (countdown <= 0) {
+      runQuery();
+      countdown = seconds;
+    }
+    btnAutoRefresh.textContent = `${countdown}s`;
+  }, 1000);
+}
+
+btnAutoRefresh.addEventListener('click', () => {
+  if (autoRefreshTimer) {
+    stopAutoRefresh();
+  } else {
+    runQuery();
+    startAutoRefresh();
+  }
+});
+
+autoRefreshInterval.addEventListener('change', () => {
+  if (autoRefreshTimer) {
+    runQuery();
+    startAutoRefresh();
+  }
+});
+
 // ---- Database selector ----
-async function fetchDatabases(conn) {
+async function fetchDatabases(conn, tab) {
   try {
     const result = await window.api.executeQuery(conn,
       `SELECT datname FROM pg_database WHERE datistemplate = false ORDER BY datname`
     );
     if (result.columns && result.rows) {
-      dbSelector.innerHTML = '';
-      for (const row of result.rows) {
-        const opt = document.createElement('option');
-        opt.value = row[0];
-        opt.textContent = row[0];
-        if (row[0] === (conn.database || 'postgres')) opt.selected = true;
-        dbSelector.appendChild(opt);
+      const dbs = result.rows.map(r => r[0]);
+      if (tab) tab.databases = dbs;
+      // Only update selector if this tab is still active
+      if (!tab || getActiveTab()?.id === tab.id) {
+        renderDbSelector(dbs, conn.database || 'postgres');
       }
     }
   } catch (e) {
     console.log('Database list fetch failed:', e);
+  }
+}
+
+function renderDbSelector(dbs, selected) {
+  dbSelector.innerHTML = '';
+  for (const db of dbs) {
+    const opt = document.createElement('option');
+    opt.value = db;
+    opt.textContent = db;
+    if (db === selected) opt.selected = true;
+    dbSelector.appendChild(opt);
   }
 }
 
@@ -683,8 +2142,8 @@ dbSelector.addEventListener('change', async () => {
     await window.api.saveConnections(connections.map(sanitizeConn));
   }
 
-  window.api.killPty(tab.connId);
-  await window.api.spawnPty(tab.connId, tab.connection);
+  window.api.killPty(tab.ptyId);
+  await window.api.spawnPty(tab.ptyId, tab.connection);
   connectionInfo.textContent = `${tab.connection.user || 'postgres'}@${tab.connection.host || 'localhost'}:${tab.connection.port || 5432}/${newDb}`;
 
   if (tab.terminal) {
@@ -726,10 +2185,7 @@ async function fetchSchemaForTab(tab) {
           });
         } else {
           const tmp = document.createElement('div');
-          tab.editorView = createEditor(tmp, {
-            onRun: runQuery,
-            onSendTerminal: sendToTerminal,
-          });
+          tab.editorView = createEditor(tmp, editorCallbacks());
         }
         if (content) {
           tab.editorView.dispatch({ changes: { from: 0, insert: content } });
@@ -799,18 +2255,80 @@ function setupResizeHandles() {
   });
 }
 
+// ---- Panel collapse/expand ----
+const panelMap = {
+  editor: editorPanel,
+  results: resultsPanel,
+  terminal: terminalPanel,
+};
+
+// Heights saved before collapsing so we can restore
+const savedHeights = { editor: null, results: null, terminal: null };
+
+function togglePanel(panelName) {
+  const panel = panelMap[panelName];
+  const btn = panel.querySelector('.panel-collapse-btn');
+  const isCollapsed = panel.classList.contains('panel-collapsed');
+
+  if (isCollapsed) {
+    // Expand
+    panel.classList.remove('panel-collapsed');
+    btn.classList.remove('collapsed');
+    if (savedHeights[panelName]) {
+      panel.style.height = savedHeights[panelName];
+    }
+    panel.style.flex = '';
+  } else {
+    // Collapse — save current height first
+    savedHeights[panelName] = panel.getBoundingClientRect().height + 'px';
+    panel.classList.add('panel-collapsed');
+    btn.classList.add('collapsed');
+    panel.style.flex = '';
+  }
+
+  redistributePanelSpace();
+
+  // Refit terminal
+  const tab = getActiveTab();
+  if (tab?.fitAddon) requestAnimationFrame(() => tab.fitAddon.fit());
+
+  // Save collapse state to active tab
+  if (tab) {
+    if (!tab.collapsedPanels) tab.collapsedPanels = {};
+    tab.collapsedPanels[panelName] = !isCollapsed;
+  }
+}
+
+function redistributePanelSpace() {
+  if (!session || session.classList.contains('hidden')) return;
+
+  const panels = ['editor', 'results', 'terminal'];
+  const expanded = panels.filter(p => !panelMap[p].classList.contains('panel-collapsed'));
+
+  // Reset flex on all
+  for (const p of panels) {
+    panelMap[p].style.flex = '';
+  }
+
+  if (expanded.length === 0) return;
+
+  // The last expanded panel takes remaining space
+  const lastExpanded = expanded[expanded.length - 1];
+  panelMap[lastExpanded].style.flex = '1';
+  // Remove fixed height so flex works
+  panelMap[lastExpanded].style.height = '';
+}
+
+document.querySelectorAll('.panel-collapse-btn').forEach((btn) => {
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    togglePanel(btn.dataset.panel);
+  });
+});
+
 // Window resize
 window.addEventListener('resize', () => {
-  const termPanel = document.getElementById('terminal-panel');
-  if (termPanel && session && !session.classList.contains('hidden')) {
-    const mainH = document.getElementById('main').getBoundingClientRect().height;
-    const tabBarH = tabBar.classList.contains('hidden') ? 0 : tabBar.getBoundingClientRect().height;
-    const editorH = editorPanel.getBoundingClientRect().height;
-    const resultsH = resultsPanel.getBoundingClientRect().height;
-    const handles = 8;
-    const remaining = mainH - tabBarH - editorH - resultsH - handles;
-    termPanel.style.height = Math.max(80, remaining) + 'px';
-  }
+  redistributePanelSpace();
   const tab = getActiveTab();
   if (tab?.fitAddon) tab.fitAddon.fit();
 });

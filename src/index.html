@@ -20,7 +20,13 @@
   <aside id="sidebar">
     <div class="sidebar-header">
       <h1>Aperium</h1>
-      <button id="btn-new-connection" title="New connection">+</button>
+      <div class="sidebar-header-actions">
+        <button id="btn-import" title="Import connections from file">&#8615;</button>
+        <button id="btn-new-connection" title="New connection">+</button>
+      </div>
+    </div>
+    <div class="sidebar-search">
+      <input type="text" id="conn-search" placeholder="Filter connections..." autocomplete="off">
     </div>
     <div id="connection-list"></div>
   </aside>
@@ -46,10 +52,29 @@
       <!-- SQL Editor -->
       <div id="editor-panel">
         <div id="editor-toolbar">
-          <span class="editor-label">SQL Editor</span>
+          <div class="panel-label">
+            <button class="panel-collapse-btn" data-panel="editor" title="Collapse/expand">&#9660;</button>
+            <span class="editor-label">SQL Editor</span>
+          </div>
           <div class="editor-actions">
+            <div class="snippets-wrapper">
+              <button id="btn-snippets" title="Investigation queries">Snippets ▾</button>
+              <div id="snippets-menu" class="snippets-menu hidden"></div>
+            </div>
+            <button id="btn-schema" title="View database schema">Schema</button>
             <select id="db-selector" title="Switch database"></select>
             <button id="btn-run" title="Run query (Cmd+Enter)">Run</button>
+            <button id="btn-stop" class="hidden" title="Stop running query">&#9632;</button>
+            <div class="auto-refresh-wrapper">
+              <button id="btn-auto-refresh" title="Auto-refresh query">Auto</button>
+              <select id="auto-refresh-interval" title="Refresh interval">
+                <option value="2">2s</option>
+                <option value="5" selected>5s</option>
+                <option value="10">10s</option>
+                <option value="30">30s</option>
+                <option value="60">60s</option>
+              </select>
+            </div>
             <button id="btn-send-terminal" title="Send to psql terminal (Cmd+Shift+Enter)">Send to terminal</button>
             <button id="btn-clear-editor" title="Clear editor">Clear</button>
           </div>
@@ -63,11 +88,16 @@
       <!-- Results panel -->
       <div id="results-panel">
         <div id="results-toolbar">
-          <span class="results-label">Results</span>
+          <div class="panel-label">
+            <button class="panel-collapse-btn" data-panel="results" title="Collapse/expand">&#9660;</button>
+            <span class="results-label">Results</span>
+          </div>
           <div class="results-right">
             <span id="results-status"></span>
             <button id="btn-copy-csv" class="results-btn hidden" title="Copy as CSV">Copy CSV</button>
             <button id="btn-copy-json" class="results-btn hidden" title="Copy as JSON">Copy JSON</button>
+            <button id="btn-export-csv" class="results-btn hidden" title="Export as CSV file">Export CSV</button>
+            <button id="btn-export-json" class="results-btn hidden" title="Export as JSON file">Export JSON</button>
           </div>
         </div>
         <div id="results-container">
@@ -81,10 +111,36 @@
       <!-- Terminal -->
       <div id="terminal-panel">
         <div id="terminal-toolbar">
-          <span class="terminal-label">psql terminal</span>
+          <div class="panel-label">
+            <button class="panel-collapse-btn" data-panel="terminal" title="Collapse/expand">&#9660;</button>
+            <span class="terminal-label">psql terminal</span>
+          </div>
           <span id="connection-info" class="connection-badge"></span>
         </div>
         <div id="terminal-container"></div>
+      </div>
+
+      <!-- ERD Schema Viewer -->
+      <div id="erd-overlay" class="hidden">
+        <div id="erd-toolbar">
+          <span class="erd-title">Database Schema</span>
+          <div class="erd-actions">
+            <span id="erd-status" class="erd-status"></span>
+            <div class="erd-spread">
+              <button id="erd-compact" title="Compact tables">−</button>
+              <span class="erd-spread-label">Spread</span>
+              <button id="erd-spread-btn" title="Spread tables">+</button>
+            </div>
+            <button id="erd-zoom-reset" title="Reset zoom">Reset view</button>
+            <button id="erd-close" title="Close schema view">&times;</button>
+          </div>
+        </div>
+        <div id="erd-schema-nav"></div>
+        <div id="erd-viewport">
+          <svg id="erd-lines"></svg>
+          <div id="erd-canvas"></div>
+          <div id="erd-detail" class="hidden"></div>
+        </div>
       </div>
     </div>
   </main>

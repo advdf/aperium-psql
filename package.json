@@ -7,7 +7,7 @@
   "scripts": {
     "build": "esbuild src/renderer.js --bundle --outfile=dist/renderer.bundle.js --platform=browser --format=iife --target=chrome120",
     "start": "npm run build && electron .",
-    "package": "npm run build && npx @electron/packager . 'Aperium PSQL' --platform=darwin --arch=arm64 --icon=assets/icon.icns --overwrite --prune=true --ignore='(src/|assets/icon.iconset|assets/icon_rounded|assets/icon_macos|\\.iconset)',",
+    "package": "npm run build && npx @electron/packager . 'Aperium PSQL' --platform=darwin --arch=arm64 --icon=assets/icon.icns --overwrite --prune=true --asar.unpackDir=node_modules/node-pty --ignore='(src/|assets/icon.iconset|assets/icon_rounded|assets/icon_macos|\\.iconset)',",
     "rebuild": "electron-rebuild"
   },
   "dependencies": {

@@ -1,10 +1,25 @@
-const { app, BrowserWindow, ipcMain, nativeImage } = require('electron');
+const { app, BrowserWindow, ipcMain, nativeImage, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const pty = require('node-pty');
 
 const ptySessions = new Map();
 let mainWindow;
+
+// Ensure Homebrew psql is findable in packaged app
+if (!process.env.PATH || !process.env.PATH.includes('/opt/homebrew/bin')) {
+  process.env.PATH = `/opt/homebrew/bin:/usr/local/bin:${process.env.PATH || '/usr/bin:/bin'}`;
+}
+
+// File logging for packaged app debugging
+const logFile = path.join(app.getPath('userData'), 'aperium.log');
+function logToFile(...args) {
+  const msg = `[${new Date().toISOString()}] ${args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ')}\n`;
+  try { fs.appendFileSync(logFile, msg); } catch {}
+  console.log(...args);
+}
+logToFile('=== App starting ===');
+logToFile('PATH:', process.env.PATH);
 
 // Simple JSON store (electron-store v8 is ESM-only)
 const storeFile = path.join(app.getPath('userData'), 'connections.json');
@@ -75,6 +90,12 @@ ipcMain.handle('pty:spawn', (event, { id, connection }) => {
     if (connection.database) args.push('-d', connection.database);
 
     const env = { ...process.env };
+    // Ensure Homebrew paths are available (packaged app has minimal PATH)
+    if (env.PATH && !env.PATH.includes('/opt/homebrew/bin')) {
+      env.PATH = `/opt/homebrew/bin:/usr/local/bin:${env.PATH}`;
+    } else if (!env.PATH) {
+      env.PATH = '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin';
+    }
     if (connection.password) {
       env.PGPASSWORD = connection.password;
     }
@@ -85,15 +106,32 @@ ipcMain.handle('pty:spawn', (event, { id, connection }) => {
     env.PSQL_PAGER = 'cat';
     env.PAGER = 'cat';
 
-    console.log('Spawning psql with args:', args);
+    // Find psql binary
+    const psqlPaths = ['/opt/homebrew/bin/psql', '/usr/local/bin/psql', '/usr/bin/psql'];
+    let psqlBin = psqlPaths.find(p => fs.existsSync(p)) || 'psql';
 
-    const shell = pty.spawn('/opt/homebrew/bin/psql', args, {
-      name: 'xterm-256color',
-      cols: 120,
-      rows: 30,
-      cwd: process.env.HOME,
-      env,
-    });
+    logToFile('psql binary:', psqlBin, 'exists:', fs.existsSync(psqlBin));
+    logToFile('zsh exists:', fs.existsSync('/bin/zsh'));
+    logToFile('Spawning with args:', args);
+
+    // Use /bin/zsh -l -c to ensure full shell environment (packaged apps have minimal env)
+    const escapedArgs = args.map(a => `'${a.replace(/'/g, "'\\''")}'`).join(' ');
+    logToFile('Full command: /bin/zsh -l -c', `${psqlBin} ${escapedArgs}`);
+
+    let shell;
+    try {
+      shell = pty.spawn('/bin/zsh', ['-l', '-c', `${psqlBin} ${escapedArgs}`], {
+        name: 'xterm-256color',
+        cols: 120,
+        rows: 30,
+        cwd: process.env.HOME,
+        env,
+      });
+      logToFile('PTY spawn success, pid:', shell.pid);
+    } catch (spawnErr) {
+      logToFile('PTY spawn error:', spawnErr.message, spawnErr.stack);
+      throw spawnErr;
+    }
 
   ptySessions.set(id, shell);
 
@@ -102,8 +140,12 @@ ipcMain.handle('pty:spawn', (event, { id, connection }) => {
   });
 
   shell.onExit(({ exitCode }) => {
-    ptySessions.delete(id);
-    mainWindow?.webContents.send('pty:exit', { id, exitCode });
+    // Guard against evicting a replacement session: a new shell may have been
+    // stored under the same id before this one's async exit fires.
+    if (ptySessions.get(id) === shell) {
+      ptySessions.delete(id);
+      mainWindow?.webContents.send('pty:exit', { id, exitCode });
+    }
   });
 
   return true;
@@ -138,9 +180,21 @@ ipcMain.on('pty:send-query', (_, { id, query }) => {
   }
 });
 
+// Track running query processes so they can be cancelled
+const runningQueries = new Map();
+
+ipcMain.on('query:cancel', (_, { queryId }) => {
+  const proc = runningQueries.get(queryId);
+  if (proc) {
+    try { proc.kill('SIGTERM'); } catch {}
+    runningQueries.delete(queryId);
+    logToFile('Query cancelled:', queryId);
+  }
+});
+
 // Execute query and return structured results (separate from interactive terminal)
-ipcMain.handle('query:execute', async (_, { connection, query }) => {
-  const { execFile } = require('child_process');
+ipcMain.handle('query:execute', async (_, { connection, query, queryId }) => {
+  const { spawn } = require('child_process');
 
   return new Promise((resolve) => {
     const args = ['--csv', '--no-psqlrc', '-c', query.trim()];
@@ -150,16 +204,51 @@ ipcMain.handle('query:execute', async (_, { connection, query }) => {
     if (connection.database) args.push('-d', connection.database);
 
     const env = { ...process.env };
+    if (env.PATH && !env.PATH.includes('/opt/homebrew/bin')) {
+      env.PATH = `/opt/homebrew/bin:/usr/local/bin:${env.PATH}`;
+    } else if (!env.PATH) {
+      env.PATH = '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin';
+    }
     if (connection.password) env.PGPASSWORD = connection.password;
     if (connection.sslmode) env.PGSSLMODE = connection.sslmode;
 
+    // Find psql binary
+    const psqlPaths = ['/opt/homebrew/bin/psql', '/usr/local/bin/psql', '/usr/bin/psql'];
+    const psqlBin = psqlPaths.find(p => fs.existsSync(p)) || 'psql';
+
     const startTime = Date.now();
+    logToFile('executeQuery spawning:', psqlBin, 'host:', connection.host, 'queryId:', queryId);
 
-    execFile('/opt/homebrew/bin/psql', args, { env, timeout: 30000 }, (err, stdout, stderr) => {
+    const proc = spawn(psqlBin, args, { env });
+    if (queryId) runningQueries.set(queryId, proc);
+
+    let stdout = '';
+    let stderr = '';
+    let cancelled = false;
+
+    proc.stdout.on('data', (chunk) => { stdout += chunk.toString(); });
+    proc.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
+
+    proc.on('error', (err) => {
+      if (queryId) runningQueries.delete(queryId);
+      logToFile('executeQuery spawn error:', err.message);
+      resolve({ error: err.message, duration: Date.now() - startTime });
+    });
+
+    proc.on('close', (code, signal) => {
+      if (queryId) runningQueries.delete(queryId);
       const duration = Date.now() - startTime;
+      cancelled = signal === 'SIGTERM' || signal === 'SIGKILL';
 
-      if (err) {
-        resolve({ error: stderr || err.message, duration });
+      logToFile('executeQuery close code:', code, 'signal:', signal, 'stdout len:', stdout.length, 'stderr len:', stderr.length);
+
+      if (cancelled) {
+        resolve({ error: 'Query cancelled', duration, cancelled: true });
+        return;
+      }
+
+      if (code !== 0) {
+        resolve({ error: stderr.trim() || `psql exited with code ${code}`, duration });
         return;
       }
 
@@ -171,8 +260,6 @@ ipcMain.handle('query:execute', async (_, { connection, query }) => {
           return;
         }
 
-        // Handle non-SELECT (INSERT, UPDATE, DELETE, etc.)
-        // psql --csv with non-SELECT returns the command tag in stderr
         const columns = parseCSVLine(lines[0]);
         const rows = [];
         for (let i = 1; i < lines.length; i++) {
@@ -183,10 +270,10 @@ ipcMain.handle('query:execute', async (_, { connection, query }) => {
 
         resolve({ columns, rows, rowCount: rows.length, duration, notice: stderr || null });
       } catch (parseErr) {
-        // Non-tabular output (e.g. INSERT 0 1)
         resolve({ message: stdout.trim() || stderr.trim() || 'Done.', duration });
       }
     });
+
   });
 });
 
@@ -220,6 +307,104 @@ function parseCSVLine(line) {
   }
   result.push(current);
   return result;
+}
+
+// Export results to file
+ipcMain.handle('export:save', async (_, { content, defaultName, filters }) => {
+  const result = await dialog.showSaveDialog(mainWindow, {
+    title: 'Export Results',
+    defaultPath: defaultName,
+    filters,
+  });
+  if (result.canceled) return { canceled: true };
+  fs.writeFileSync(result.filePath, content, 'utf-8');
+  return { filePath: result.filePath };
+});
+
+// Snippets file management
+const snippetsFile = path.join(app.getPath('userData'), 'snippets.json');
+
+ipcMain.handle('snippets:load', () => {
+  try {
+    return JSON.parse(fs.readFileSync(snippetsFile, 'utf-8'));
+  } catch {
+    return null; // fallback to built-in
+  }
+});
+
+ipcMain.handle('snippets:save', (_, snippets) => {
+  fs.writeFileSync(snippetsFile, JSON.stringify(snippets, null, 2));
+});
+
+ipcMain.handle('snippets:path', () => snippetsFile);
+
+ipcMain.handle('snippets:open-in-editor', () => {
+  const { shell } = require('electron');
+  // Create file with built-in snippets if it doesn't exist
+  if (!fs.existsSync(snippetsFile)) {
+    // Will be populated by renderer on first call
+    return { needsInit: true, path: snippetsFile };
+  }
+  shell.openPath(snippetsFile);
+  return { needsInit: false, path: snippetsFile };
+});
+
+// Import connections from file
+ipcMain.handle('connections:import', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: 'Import Connections',
+    filters: [
+      { name: 'JSON / CSV', extensions: ['json', 'csv'] },
+      { name: 'All Files', extensions: ['*'] },
+    ],
+    properties: ['openFile'],
+  });
+
+  if (result.canceled || !result.filePaths.length) return { canceled: true };
+
+  const filePath = result.filePaths[0];
+  const ext = path.extname(filePath).toLowerCase();
+  const raw = fs.readFileSync(filePath, 'utf-8');
+
+  try {
+    let imported = [];
+
+    if (ext === '.json') {
+      const parsed = JSON.parse(raw);
+      const arr = Array.isArray(parsed) ? parsed : (parsed.connections || [parsed]);
+      imported = arr.map(normalizeImportedConn);
+    } else {
+      // CSV
+      const lines = raw.trim().split('\n');
+      if (lines.length < 2) return { error: 'CSV file is empty or has no data rows.' };
+      const headers = parseCSVLine(lines[0]).map(h => h.trim().toLowerCase());
+      for (let i = 1; i < lines.length; i++) {
+        if (!lines[i].trim()) continue;
+        const values = parseCSVLine(lines[i]);
+        const obj = {};
+        headers.forEach((h, idx) => { obj[h] = values[idx] || ''; });
+        imported.push(normalizeImportedConn(obj));
+      }
+    }
+
+    return { connections: imported, count: imported.length };
+  } catch (err) {
+    return { error: `Failed to parse file: ${err.message}` };
+  }
+});
+
+function normalizeImportedConn(obj) {
+  return {
+    id: obj.id || require('crypto').randomUUID(),
+    name: obj.name || obj.label || `${obj.host || 'localhost'}:${obj.port || 5432}/${obj.database || 'postgres'}`,
+    host: obj.host || obj.hostname || 'localhost',
+    port: String(obj.port || 5432),
+    user: obj.user || obj.username || '',
+    password: obj.password || '',
+    database: obj.database || obj.dbname || obj.db || 'postgres',
+    sslmode: obj.sslmode || obj.ssl || '',
+    group: obj.group || '',
+  };
 }
 
 // Cleanup on quit
