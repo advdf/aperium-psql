@@ -6,10 +6,32 @@ const pty = require('node-pty');
 const ptySessions = new Map();
 let mainWindow;
 
-// Ensure Homebrew psql is findable in packaged app
-if (!process.env.PATH || !process.env.PATH.includes('/opt/homebrew/bin')) {
-  process.env.PATH = `/opt/homebrew/bin:/usr/local/bin:${process.env.PATH || '/usr/bin:/bin'}`;
+const IS_MAC = process.platform === 'darwin';
+
+// Platform-specific psql lookup paths (searched in order)
+const PSQL_CANDIDATE_PATHS = IS_MAC
+  ? ['/opt/homebrew/bin/psql', '/usr/local/bin/psql', '/usr/bin/psql']
+  : ['/usr/bin/psql', '/usr/local/bin/psql'];
+
+function findPsqlBin() {
+  return PSQL_CANDIDATE_PATHS.find(p => fs.existsSync(p)) || 'psql';
 }
+
+function ensurePath(env) {
+  if (IS_MAC) {
+    if (env.PATH && !env.PATH.includes('/opt/homebrew/bin')) {
+      env.PATH = `/opt/homebrew/bin:/usr/local/bin:${env.PATH}`;
+    } else if (!env.PATH) {
+      env.PATH = '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin';
+    }
+  } else if (!env.PATH) {
+    env.PATH = '/usr/local/bin:/usr/bin:/bin';
+  }
+  return env;
+}
+
+// Packaged macOS apps inherit a minimal PATH; on Linux the desktop session already provides one.
+ensurePath(process.env);
 
 // File logging for packaged app debugging
 const logFile = path.join(app.getPath('userData'), 'aperium.log');
@@ -89,13 +111,7 @@ ipcMain.handle('pty:spawn', (event, { id, connection }) => {
     if (connection.user) args.push('-U', connection.user);
     if (connection.database) args.push('-d', connection.database);
 
-    const env = { ...process.env };
-    // Ensure Homebrew paths are available (packaged app has minimal PATH)
-    if (env.PATH && !env.PATH.includes('/opt/homebrew/bin')) {
-      env.PATH = `/opt/homebrew/bin:/usr/local/bin:${env.PATH}`;
-    } else if (!env.PATH) {
-      env.PATH = '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin';
-    }
+    const env = ensurePath({ ...process.env });
     if (connection.password) {
       env.PGPASSWORD = connection.password;
     }
@@ -106,21 +122,29 @@ ipcMain.handle('pty:spawn', (event, { id, connection }) => {
     env.PSQL_PAGER = 'cat';
     env.PAGER = 'cat';
 
-    // Find psql binary
-    const psqlPaths = ['/opt/homebrew/bin/psql', '/usr/local/bin/psql', '/usr/bin/psql'];
-    let psqlBin = psqlPaths.find(p => fs.existsSync(p)) || 'psql';
+    const psqlBin = findPsqlBin();
 
     logToFile('psql binary:', psqlBin, 'exists:', fs.existsSync(psqlBin));
-    logToFile('zsh exists:', fs.existsSync('/bin/zsh'));
     logToFile('Spawning with args:', args);
 
-    // Use /bin/zsh -l -c to ensure full shell environment (packaged apps have minimal env)
-    const escapedArgs = args.map(a => `'${a.replace(/'/g, "'\\''")}'`).join(' ');
-    logToFile('Full command: /bin/zsh -l -c', `${psqlBin} ${escapedArgs}`);
+    // On macOS packaged apps have a minimal env, so we wrap in a login shell
+    // to pick up the user's profile. On Linux the desktop session already
+    // provides a sane environment, so we spawn psql directly.
+    let spawnCmd, spawnArgs;
+    if (IS_MAC && fs.existsSync('/bin/zsh')) {
+      const escapedArgs = args.map(a => `'${a.replace(/'/g, "'\\''")}'`).join(' ');
+      spawnCmd = '/bin/zsh';
+      spawnArgs = ['-l', '-c', `${psqlBin} ${escapedArgs}`];
+      logToFile('Full command: /bin/zsh -l -c', `${psqlBin} ${escapedArgs}`);
+    } else {
+      spawnCmd = psqlBin;
+      spawnArgs = args;
+      logToFile('Full command:', psqlBin, args.join(' '));
+    }
 
     let shell;
     try {
-      shell = pty.spawn('/bin/zsh', ['-l', '-c', `${psqlBin} ${escapedArgs}`], {
+      shell = pty.spawn(spawnCmd, spawnArgs, {
         name: 'xterm-256color',
         cols: 120,
         rows: 30,
@@ -203,18 +227,11 @@ ipcMain.handle('query:execute', async (_, { connection, query, queryId }) => {
     if (connection.user) args.push('-U', connection.user);
     if (connection.database) args.push('-d', connection.database);
 
-    const env = { ...process.env };
-    if (env.PATH && !env.PATH.includes('/opt/homebrew/bin')) {
-      env.PATH = `/opt/homebrew/bin:/usr/local/bin:${env.PATH}`;
-    } else if (!env.PATH) {
-      env.PATH = '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin';
-    }
+    const env = ensurePath({ ...process.env });
     if (connection.password) env.PGPASSWORD = connection.password;
     if (connection.sslmode) env.PGSSLMODE = connection.sslmode;
 
-    // Find psql binary
-    const psqlPaths = ['/opt/homebrew/bin/psql', '/usr/local/bin/psql', '/usr/bin/psql'];
-    const psqlBin = psqlPaths.find(p => fs.existsSync(p)) || 'psql';
+    const psqlBin = findPsqlBin();
 
     const startTime = Date.now();
     logToFile('executeQuery spawning:', psqlBin, 'host:', connection.host, 'queryId:', queryId);

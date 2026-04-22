@@ -72,8 +72,11 @@ A clean, modern PostgreSQL desktop client built with Electron. Combines a real `
 ### Prerequisites
 
 - [Node.js](https://nodejs.org/) (v18+)
-- `psql` (PostgreSQL client) installed and available — resolved via PATH, with fallbacks to `/opt/homebrew/bin/psql`, `/usr/local/bin/psql`, `/usr/bin/psql`
+- `psql` (PostgreSQL client) installed and available. The app searches, in order:
+  - **macOS**: `/opt/homebrew/bin/psql`, `/usr/local/bin/psql`, `/usr/bin/psql` (install via `brew install libpq` or `brew install postgresql`)
+  - **Linux**: `/usr/bin/psql`, `/usr/local/bin/psql` (install via `apt install postgresql-client` / `dnf install postgresql`)
 - Python `setuptools` (`pip3 install setuptools`) — required for node-gyp when building `node-pty`
+- On Linux, basic build tools for native module compilation: `build-essential` / `gcc-c++`, `python3`, `make`
 
 ### From source
 
@@ -94,6 +97,32 @@ npm run package
 cp -r "Aperium PSQL-darwin-arm64/Aperium PSQL.app" /Applications/
 ```
 
+### Package as Linux app
+
+```bash
+npm run package:linux           # x64
+npm run package:linux-arm64     # arm64
+
+# Output: ./aperium-psql-linux-x64/ (or aperium-psql-linux-arm64/)
+# Run directly:
+./aperium-psql-linux-x64/aperium-psql
+
+# Optional: move under /opt and add a .desktop entry for app-menu integration
+sudo mv aperium-psql-linux-x64 /opt/aperium-psql
+sudo tee /usr/share/applications/aperium-psql.desktop <<EOF
+[Desktop Entry]
+Name=Aperium PSQL
+Exec=/opt/aperium-psql/aperium-psql
+Icon=/opt/aperium-psql/resources/app/assets/icon.png
+Type=Application
+Categories=Development;Database;
+EOF
+```
+
+> **Note**: `@electron/packager` produces a directory, not an `.AppImage` or `.deb`. For those formats, run `electron-builder` on top of this output (not included by default to keep the dep tree small).
+>
+> Cross-building from macOS works for the JS side, but `node-pty` is a native module — rebuild on the target architecture before packaging: run `npx @electron/rebuild` on a Linux machine (or in a Linux container) before `npm run package:linux`.
+
 ## Architecture
 
 ```
@@ -110,13 +139,20 @@ src/
   styles.css     Catppuccin Mocha theme
 assets/
   icon.icns      macOS app icon (boar + database, 8-bit alpha)
-  icon.png       Icon (PNG)
+  icon.png       Icon (PNG, used on Linux and as dock override)
 ```
 
 ### Data directories
 
-- **Connections**: `~/Library/Application Support/Aperium PSQL/connections.json`
-- **Snippets**: `~/Library/Application Support/Aperium PSQL/snippets.json`
+Electron's `app.getPath('userData')` resolves per-OS:
+
+- **macOS**: `~/Library/Application Support/Aperium PSQL/`
+- **Linux**: `~/.config/Aperium PSQL/`
+
+Files stored there:
+
+- `connections.json`
+- `snippets.json`
 - **Debug log**: `~/Library/Application Support/Aperium PSQL/aperium.log`
 
 > ⚠️ Connection passwords are stored in plain text, protected only by filesystem permissions. Exports (CSV/JSON) include passwords when the source connection has one.
