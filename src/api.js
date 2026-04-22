@@ -78,7 +78,7 @@
   }
 
   function normalizeImportedConn(obj) {
-    return {
+    const out = {
       id: obj.id || crypto.randomUUID(),
       name: obj.name || obj.label || `${obj.host || 'localhost'}:${obj.port || 5432}/${obj.database || 'postgres'}`,
       host: obj.host || obj.hostname || 'localhost',
@@ -89,6 +89,8 @@
       sslmode: obj.sslmode || obj.ssl || '',
       group: obj.group || '',
     };
+    if (obj.tunnel && typeof obj.tunnel === 'object') out.tunnel = obj.tunnel;
+    return out;
   }
 
   function pickFile(accept) {
@@ -187,6 +189,14 @@
       }).then((r) => r.json()),
 
     getSnippetsPath: () => Promise.resolve('(server) snippets.json'),
+
+    listBastions: () => fetch('/api/bastions').then((r) => r.json()),
+    saveBastions: (bastions) =>
+      fetch('/api/bastions', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(bastions),
+      }).then((r) => r.json()),
 
     openSnippetsInEditor: async () => {
       const current = await api.loadSnippets();

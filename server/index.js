@@ -5,6 +5,36 @@ const fs = require('fs');
 const { spawn } = require('child_process');
 const { WebSocketServer } = require('ws');
 const pty = require('node-pty');
+const { openTunnelChain } = require('./ssh-tunnel');
+
+function loadBastions() {
+  try { return JSON.parse(fs.readFileSync(bastionsFile, 'utf-8')); }
+  catch { return []; }
+}
+
+function resolveHops(hops) {
+  const bastions = loadBastions();
+  const byId = new Map(bastions.map((b) => [b.id, b]));
+  return hops.map((hop, i) => {
+    if (hop && hop.bastionId) {
+      const b = byId.get(hop.bastionId);
+      if (!b) throw new Error(`hop ${i + 1}: bastion ${hop.bastionId} not found`);
+      return { host: b.host, port: b.port, user: b.user, privateKey: b.privateKey, passphrase: b.passphrase };
+    }
+    return hop;
+  });
+}
+
+async function maybeOpenTunnel(connection) {
+  const t = connection && connection.tunnel;
+  if (!t || !t.enabled || !Array.isArray(t.hops) || t.hops.length === 0) return null;
+  const resolved = resolveHops(t.hops);
+  return openTunnelChain({
+    hops: resolved,
+    dbHost: connection.host,
+    dbPort: Number(connection.port) || 5432,
+  });
+}
 
 const DATA_DIR = process.env.APERIUM_DATA_DIR || path.join(__dirname, '..', 'data');
 fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -28,6 +58,7 @@ log('psql binary:', findPsqlBin());
 
 const connectionsFile = path.join(DATA_DIR, 'connections.json');
 const snippetsFile = path.join(DATA_DIR, 'snippets.json');
+const bastionsFile = path.join(DATA_DIR, 'bastions.json');
 
 function storeGet(file, key, fallback) {
   try { return JSON.parse(fs.readFileSync(file, 'utf-8'))[key] ?? fallback; }
@@ -108,14 +139,36 @@ app.put('/api/snippets', (req, res) => {
   res.json({ ok: true });
 });
 
-app.post('/api/query', (req, res) => {
+app.get('/api/bastions', (_req, res) => {
+  res.json(loadBastions());
+});
+
+app.put('/api/bastions', (req, res) => {
+  if (!Array.isArray(req.body)) return res.status(400).json({ error: 'expected an array' });
+  fs.writeFileSync(bastionsFile, JSON.stringify(req.body, null, 2));
+  res.json({ ok: true });
+});
+
+app.post('/api/query', async (req, res) => {
   const { connection, query, queryId } = req.body || {};
   if (!connection || !query) return res.status(400).json({ error: 'connection and query are required' });
 
-  const args = ['--csv', '--no-psqlrc', '-c', String(query).trim(), ...buildPsqlArgs(connection)];
-  const env = buildPsqlEnv(connection);
   const startTime = Date.now();
-  log('executeQuery host:', connection.host, 'queryId:', queryId);
+  let tunnel = null;
+  try {
+    tunnel = await maybeOpenTunnel(connection);
+  } catch (err) {
+    log('executeQuery tunnel error:', err.message);
+    return res.json({ error: `SSH tunnel: ${err.message}`, duration: Date.now() - startTime });
+  }
+
+  const effectiveConn = tunnel
+    ? { ...connection, host: tunnel.localHost, port: String(tunnel.localPort) }
+    : connection;
+
+  const args = ['--csv', '--no-psqlrc', '-c', String(query).trim(), ...buildPsqlArgs(effectiveConn)];
+  const env = buildPsqlEnv(connection);
+  log('executeQuery host:', connection.host, tunnel ? `(via tunnel -> 127.0.0.1:${tunnel.localPort})` : '', 'queryId:', queryId);
 
   const proc = spawn(findPsqlBin(), args, { env });
   if (queryId) runningQueries.set(queryId, proc);
@@ -126,6 +179,7 @@ app.post('/api/query', (req, res) => {
   const respond = (body) => {
     if (responded) return;
     responded = true;
+    if (tunnel) { try { tunnel.close(); } catch {} }
     res.json(body);
   };
 
@@ -180,26 +234,48 @@ wss.on('connection', (ws, req) => {
   const url = new URL(req.url, 'http://x');
   const tabId = url.searchParams.get('tabId') || 'default';
   let shell = null;
+  let tunnel = null;
 
   const safeSend = (payload) => {
     if (ws.readyState !== ws.OPEN) return;
     try { ws.send(payload); } catch {}
   };
 
-  ws.on('message', (raw) => {
+  const closeTunnel = () => {
+    if (tunnel) {
+      try { tunnel.close(); } catch {}
+      tunnel = null;
+    }
+  };
+
+  ws.on('message', async (raw) => {
     let msg;
     try { msg = JSON.parse(raw.toString()); } catch { return; }
 
     if (msg.type === 'spawn') {
       try {
         if (shell) { try { shell.kill(); } catch {} shell = null; }
+        closeTunnel();
         const connection = msg.connection || {};
-        const args = buildPsqlArgs(connection);
+
+        try {
+          tunnel = await maybeOpenTunnel(connection);
+        } catch (err) {
+          log('PTY tunnel error:', err.message);
+          safeSend(JSON.stringify({ type: 'error', message: `SSH tunnel: ${err.message}` }));
+          return;
+        }
+
+        const effectiveConn = tunnel
+          ? { ...connection, host: tunnel.localHost, port: String(tunnel.localPort) }
+          : connection;
+
+        const args = buildPsqlArgs(effectiveConn);
         const env = buildPsqlEnv(connection);
         env.PSQL_PAGER = 'cat';
         env.PAGER = 'cat';
         const psqlBin = findPsqlBin();
-        log('PTY spawn tabId:', tabId, 'host:', connection.host);
+        log('PTY spawn tabId:', tabId, 'host:', connection.host, tunnel ? `(via tunnel -> 127.0.0.1:${tunnel.localPort})` : '');
         shell = pty.spawn(psqlBin, args, {
           name: 'xterm-256color',
           cols: msg.cols || 120,
@@ -211,10 +287,12 @@ wss.on('connection', (ws, req) => {
         shell.onExit(({ exitCode }) => {
           safeSend(JSON.stringify({ type: 'exit', exitCode }));
           shell = null;
+          closeTunnel();
         });
         safeSend(JSON.stringify({ type: 'ready' }));
       } catch (err) {
         log('PTY spawn error:', err.message);
+        closeTunnel();
         safeSend(JSON.stringify({ type: 'error', message: err.message }));
       }
     } else if (msg.type === 'write') {
@@ -226,11 +304,13 @@ wss.on('connection', (ws, req) => {
     } else if (msg.type === 'kill') {
       try { shell?.kill(); } catch {}
       shell = null;
+      closeTunnel();
     }
   });
 
   ws.on('close', () => {
     if (shell) { try { shell.kill(); } catch {} shell = null; }
+    closeTunnel();
   });
 });
 

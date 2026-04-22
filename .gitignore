@@ -3,3 +3,6 @@ dist/
 data/
 aperium.log
 CLAUDE.md
+.claude/
+scripts/bastion_key
+scripts/bastion_key.pub

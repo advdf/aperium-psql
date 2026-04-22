@@ -296,7 +296,8 @@ function updateConnectionStatus(id, connected) {
   }
 }
 
-function openEditDialog(conn) {
+async function openEditDialog(conn) {
+  await loadBastionsCache();
   dialogTitle.textContent = 'Edit Connection';
   form.elements.id.value = conn.id;
   form.elements.group.value = conn.group || '';
@@ -307,11 +308,13 @@ function openEditDialog(conn) {
   form.elements.password.value = conn.password || '';
   form.elements.database.value = conn.database || 'postgres';
   form.elements.sslmode.value = conn.sslmode || '';
+  renderTunnelForm(conn.tunnel);
   updateGroupSuggestions();
   dialog.showModal();
 }
 
-function openDuplicateDialog(conn) {
+async function openDuplicateDialog(conn) {
+  await loadBastionsCache();
   dialogTitle.textContent = 'Duplicate Connection';
   form.elements.id.value = '';
   form.elements.group.value = conn.group || '';
@@ -322,6 +325,7 @@ function openDuplicateDialog(conn) {
   form.elements.password.value = conn.password || '';
   form.elements.database.value = conn.database || 'postgres';
   form.elements.sslmode.value = conn.sslmode || '';
+  renderTunnelForm(conn.tunnel);
   updateGroupSuggestions();
   dialog.showModal();
 }
@@ -1764,8 +1768,255 @@ btnImport.addEventListener('click', async () => {
   alert(`${added} connection(s) imported (${result.count - added} duplicates skipped).`);
 });
 
+// ---- SSH bastions store (in-memory copy of /api/bastions) ----
+let bastionsCache = [];
+
+async function loadBastionsCache() {
+  try {
+    const list = await window.api.listBastions();
+    bastionsCache = Array.isArray(list) ? list : [];
+  } catch {
+    bastionsCache = [];
+  }
+  return bastionsCache;
+}
+
+function bastionSummary(b) {
+  const host = b.host || '?';
+  const user = b.user || '?';
+  const port = b.port ? `:${b.port}` : '';
+  return `${b.name || host} (${user}@${host}${port})`;
+}
+
+// ---- SSH tunnel form helpers (connection dialog) ----
+const tunnelEnabled = document.getElementById('tunnel-enabled');
+const tunnelHopsFieldset = document.getElementById('tunnel-hops');
+const tunnelHopsList = document.getElementById('tunnel-hops-list');
+const btnAddHop = document.getElementById('btn-add-hop');
+const btnManageBastions = document.getElementById('btn-manage-bastions');
+
+function renderHopPickerOptions(selectEl, selectedId) {
+  selectEl.innerHTML = '';
+  const empty = document.createElement('option');
+  empty.value = '';
+  empty.textContent = bastionsCache.length ? '— pick a bastion —' : '— no saved bastions —';
+  selectEl.appendChild(empty);
+  for (const b of bastionsCache) {
+    const opt = document.createElement('option');
+    opt.value = b.id;
+    opt.textContent = bastionSummary(b);
+    if (b.id === selectedId) opt.selected = true;
+    selectEl.appendChild(opt);
+  }
+}
+
+function renderHopElement(hop = {}, idx = 1) {
+  const el = document.createElement('div');
+  el.className = 'tunnel-hop';
+  el.innerHTML = `
+    <div class="tunnel-hop-header">
+      <span class="tunnel-hop-title">Hop <span class="tunnel-hop-num">${idx}</span></span>
+      <button type="button" class="tunnel-remove-hop" title="Remove hop">&times;</button>
+    </div>
+    <select class="tunnel-hop-picker" data-hop-field="bastionId"></select>
+    <div class="tunnel-hop-legacy hidden">
+      <span class="tunnel-hop-legacy-label">Legacy inline bastion — migrate to library:</span>
+      <button type="button" class="tunnel-migrate-btn">Save to library</button>
+    </div>
+  `;
+  const select = el.querySelector('.tunnel-hop-picker');
+  renderHopPickerOptions(select, hop.bastionId);
+
+  const legacy = el.querySelector('.tunnel-hop-legacy');
+  const hasInline = !hop.bastionId && (hop.host || hop.user || hop.privateKey);
+  if (hasInline) {
+    legacy.classList.remove('hidden');
+    legacy.querySelector('.tunnel-hop-legacy-label').textContent =
+      `Legacy inline bastion (${hop.user || '?'}@${hop.host || '?'}) — migrate to library:`;
+    // Stash inline data on the element so we can promote it on click
+    el._inlineHop = hop;
+  }
+
+  el.querySelector('.tunnel-migrate-btn')?.addEventListener('click', async () => {
+    const inline = el._inlineHop;
+    if (!inline) return;
+    const name = prompt('Name this bastion:', `${inline.user || 'hop'}@${inline.host || 'host'}`);
+    if (!name) return;
+    const newBastion = {
+      id: crypto.randomUUID(),
+      name: name.trim(),
+      host: inline.host || '',
+      port: inline.port || '22',
+      user: inline.user || '',
+      privateKey: inline.privateKey || '',
+      passphrase: inline.passphrase || '',
+    };
+    bastionsCache.push(newBastion);
+    await window.api.saveBastions(bastionsCache);
+    // Refresh all hop pickers and select the new bastion here
+    tunnelHopsList.querySelectorAll('.tunnel-hop-picker').forEach((sel) => {
+      const cur = sel.value;
+      renderHopPickerOptions(sel, cur);
+    });
+    select.value = newBastion.id;
+    legacy.classList.add('hidden');
+    el._inlineHop = null;
+  });
+
+  el.querySelector('.tunnel-remove-hop').addEventListener('click', () => {
+    el.remove();
+    renumberHops();
+  });
+
+  return el;
+}
+
+function renumberHops() {
+  tunnelHopsList.querySelectorAll('.tunnel-hop').forEach((el, i) => {
+    el.querySelector('.tunnel-hop-num').textContent = String(i + 1);
+  });
+}
+
+function renderTunnelForm(tunnel) {
+  tunnelHopsList.innerHTML = '';
+  const enabled = !!(tunnel && tunnel.enabled);
+  tunnelEnabled.checked = enabled;
+  tunnelHopsFieldset.classList.toggle('hidden', !enabled);
+  const hops = (tunnel && Array.isArray(tunnel.hops) && tunnel.hops.length) ? tunnel.hops : [{}];
+  hops.forEach((hop, i) => tunnelHopsList.appendChild(renderHopElement(hop, i + 1)));
+}
+
+function readTunnelFromForm() {
+  const hops = Array.from(tunnelHopsList.querySelectorAll('.tunnel-hop')).map((el) => {
+    const select = el.querySelector('.tunnel-hop-picker');
+    const id = select.value;
+    if (id) return { bastionId: id };
+    // preserve legacy inline data if not yet migrated
+    if (el._inlineHop) return el._inlineHop;
+    return { bastionId: '' }; // empty — will be filtered on submit
+  });
+  return { enabled: tunnelEnabled.checked, hops };
+}
+
+tunnelEnabled.addEventListener('change', () => {
+  tunnelHopsFieldset.classList.toggle('hidden', !tunnelEnabled.checked);
+  if (tunnelEnabled.checked && tunnelHopsList.children.length === 0) {
+    tunnelHopsList.appendChild(renderHopElement({}, 1));
+  }
+});
+
+btnAddHop.addEventListener('click', () => {
+  tunnelHopsList.appendChild(renderHopElement({}, tunnelHopsList.children.length + 1));
+});
+
+btnManageBastions.addEventListener('click', () => openBastionsManager());
+
+// ---- Bastions manager dialog ----
+const bastionsDialog = document.getElementById('bastions-dialog');
+const bastionsList = document.getElementById('bastions-list');
+const btnNewBastion = document.getElementById('btn-new-bastion');
+const btnBastionsCancel = document.getElementById('btn-bastions-cancel');
+const btnBastionsSave = document.getElementById('btn-bastions-save');
+
+// Working copy so Cancel discards in-dialog edits
+let bastionsDraft = [];
+
+function renderBastionRow(b) {
+  const row = document.createElement('div');
+  row.className = 'bastion-row';
+  row.dataset.id = b.id;
+  row.innerHTML = `
+    <div class="bastion-row-header">
+      <input type="text" data-field="name" placeholder="Name (e.g. Prod bastion)">
+      <button type="button" class="bastion-delete" title="Delete">&times;</button>
+    </div>
+    <div class="bastion-row-fields">
+      <label>Host <input type="text" data-field="host" placeholder="bastion.example.com"></label>
+      <label>Port <input type="number" data-field="port" value="22"></label>
+      <label>User <input type="text" data-field="user" placeholder="jump"></label>
+      <label>Private key (PEM or OpenSSH)
+        <textarea data-field="privateKey" rows="5" spellcheck="false" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea>
+      </label>
+      <label>Passphrase (optional)
+        <input type="password" data-field="passphrase" autocomplete="new-password">
+      </label>
+    </div>
+  `;
+  row.querySelector('[data-field=name]').value = b.name || '';
+  row.querySelector('[data-field=host]').value = b.host || '';
+  row.querySelector('[data-field=port]').value = b.port != null ? String(b.port) : '22';
+  row.querySelector('[data-field=user]').value = b.user || '';
+  row.querySelector('[data-field=privateKey]').value = b.privateKey || '';
+  row.querySelector('[data-field=passphrase]').value = b.passphrase || '';
+  row.querySelector('.bastion-delete').addEventListener('click', () => {
+    row.remove();
+  });
+  return row;
+}
+
+function renderBastionsList() {
+  bastionsList.innerHTML = '';
+  if (bastionsDraft.length === 0) {
+    const empty = document.createElement('p');
+    empty.className = 'bastions-empty';
+    empty.textContent = 'No bastions yet. Click + New bastion.';
+    bastionsList.appendChild(empty);
+    return;
+  }
+  bastionsDraft.forEach((b) => bastionsList.appendChild(renderBastionRow(b)));
+}
+
+async function openBastionsManager() {
+  await loadBastionsCache();
+  // Deep copy for the draft
+  bastionsDraft = bastionsCache.map((b) => ({ ...b }));
+  renderBastionsList();
+  bastionsDialog.showModal();
+}
+
+btnNewBastion.addEventListener('click', () => {
+  const nb = { id: crypto.randomUUID(), name: '', host: '', port: '22', user: '', privateKey: '', passphrase: '' };
+  bastionsDraft.push(nb);
+  // Remove empty-state paragraph if present
+  bastionsList.querySelector('.bastions-empty')?.remove();
+  bastionsList.appendChild(renderBastionRow(nb));
+  bastionsList.lastElementChild.scrollIntoView({ block: 'nearest' });
+  bastionsList.lastElementChild.querySelector('[data-field=name]').focus();
+});
+
+btnBastionsCancel.addEventListener('click', () => {
+  bastionsDialog.close();
+});
+
+btnBastionsSave.addEventListener('click', async () => {
+  // Read DOM into draft (preserving ids)
+  const rows = Array.from(bastionsList.querySelectorAll('.bastion-row'));
+  const next = rows.map((row) => ({
+    id: row.dataset.id,
+    name: row.querySelector('[data-field=name]').value.trim(),
+    host: row.querySelector('[data-field=host]').value.trim(),
+    port: row.querySelector('[data-field=port]').value.trim() || '22',
+    user: row.querySelector('[data-field=user]').value.trim(),
+    privateKey: row.querySelector('[data-field=privateKey]').value,
+    passphrase: row.querySelector('[data-field=passphrase]').value,
+  }));
+  for (const b of next) {
+    if (!b.name) { alert('Every bastion needs a name.'); return; }
+    if (!b.host || !b.user || !b.privateKey) { alert(`Bastion "${b.name}" is missing host, user or private key.`); return; }
+  }
+  await window.api.saveBastions(next);
+  bastionsCache = next;
+  // Refresh hop pickers in the (still-open) connection dialog
+  tunnelHopsList.querySelectorAll('.tunnel-hop-picker').forEach((sel) => {
+    const cur = sel.value;
+    renderHopPickerOptions(sel, cur);
+  });
+  bastionsDialog.close();
+});
+
 // ---- New connection dialog ----
-btnNewConn.addEventListener('click', () => {
+btnNewConn.addEventListener('click', async () => {
+  await loadBastionsCache();
   dialogTitle.textContent = 'New Connection';
   form.reset();
   form.elements.id.value = '';
@@ -1773,6 +2024,7 @@ btnNewConn.addEventListener('click', () => {
   form.elements.host.value = 'localhost';
   form.elements.port.value = '5432';
   form.elements.database.value = 'postgres';
+  renderTunnelForm(null);
   updateGroupSuggestions();
   dialog.showModal();
 });
@@ -1784,6 +2036,15 @@ form.addEventListener('submit', async (e) => {
   const data = Object.fromEntries(new FormData(form));
   const editId = data.id;
   delete data.id;
+  delete data['tunnel-enabled'];
+  const tunnel = readTunnelFromForm();
+  // Drop empty hops: neither a ref nor inline data
+  tunnel.hops = tunnel.hops.filter((h) => h.bastionId || h.host || h.user || h.privateKey);
+  if (tunnel.enabled && tunnel.hops.length === 0) {
+    alert('SSH tunnel is enabled but no hops are selected. Pick at least one bastion or disable the tunnel.');
+    return;
+  }
+  data.tunnel = tunnel;
 
   if (editId) {
     const idx = connections.findIndex((c) => c.id === editId);

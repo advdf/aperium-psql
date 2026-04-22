@@ -12,6 +12,7 @@ A clean, modern PostgreSQL client served as a **web app**. Combines a real `psql
 - **Sidebar search** — filter by name, host, group or database; groups auto-expand on matches
 - **Import** connections from a JSON or CSV file (with dedup by `host:port/database@user`)
 - **Duplicate** a connection, or **open in a new tab** (`+` button or Cmd/Ctrl+click)
+- **SSH tunnel (multi-hop)** — connect through an arbitrary chain of bastions (1, 2, 3+ hops). Each hop authenticates with a private key (PEM / OpenSSH), optionally passphrase-protected. Implemented as local port forwarding: the server opens the SSH chain, binds `127.0.0.1:<ephemeral>` as the tunnel exit, and `psql` connects to that — so `PGPASSWORD`, CSV parsing, PTY prompt and SIGTERM cancellation all behave exactly as for a direct connection.
 
 ### Tabs
 - Each tab owns its own terminal, editor, results panel and `psql` PTY session
@@ -87,6 +88,31 @@ From inside the container, the host is reachable at:
 
 - **Docker Desktop (macOS/Windows WSL2)**: `host.docker.internal`
 - **Linux**: add `extra_hosts: ["host.docker.internal:host-gateway"]` to the `aperium` service in `docker-compose.yml`, or point the connection at the host's LAN IP.
+
+### Test bastion (SSH tunnel)
+
+The provided `docker-compose.yml` ships a three-service stack — `aperium`, a seeded `postgres:16`, and a `linuxserver/openssh-server` **bastion** — on two networks: `postgres` sits on `internal` only, so Aperium can't reach it directly and **must** go through the bastion. A fresh clone needs a test key:
+
+```bash
+ssh-keygen -t ed25519 -f scripts/bastion_key -N '' -C 'aperium-bastion-test'
+docker compose up -d
+```
+
+Then in the UI, create a connection:
+
+| Field | Value |
+|---|---|
+| Host | `postgres` |
+| Port | `5432` |
+| User | `aperium` |
+| Password | `aperium` |
+| Database | `aperium` |
+| **Use SSH tunnel** | ✅ |
+| **Hop 1** | host `bastion`, port `2222`, user `jump`, private key = contents of `scripts/bastion_key`, no passphrase |
+
+Add more hops (Hop 2 → bastion again, etc.) to exercise the multi-hop path. Keys and passphrases are stored in `./data/connections.json` **in plain text**, same contract as the Postgres password.
+
+To skip the tunnel entirely (direct connection), put `postgres` on the `public` network instead and expose `5432` as needed.
 
 ### Remote deployment
 

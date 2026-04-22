@@ -151,6 +151,18 @@
     </div>
   </main>
 
+  <!-- Bastions manager dialog -->
+  <dialog id="bastions-dialog" class="bastions-dialog">
+    <h3>SSH bastions</h3>
+    <p class="bastions-hint">Save reusable SSH hops. Referenced by connections via Hop dropdowns.</p>
+    <div id="bastions-list"></div>
+    <button type="button" id="btn-new-bastion" class="tunnel-add-btn">+ New bastion</button>
+    <div class="dialog-actions">
+      <button type="button" id="btn-bastions-cancel">Cancel</button>
+      <button type="button" id="btn-bastions-save">Save</button>
+    </div>
+  </dialog>
+
   <!-- Connection dialog -->
   <dialog id="connection-dialog">
     <form id="connection-form" method="dialog">
@@ -196,6 +208,21 @@
           <option value="verify-full">Verify Full</option>
         </select>
       </label>
+
+      <label class="checkbox-label">
+        <input type="checkbox" id="tunnel-enabled" name="tunnel-enabled">
+        <span>Use SSH tunnel (bastion chain)</span>
+      </label>
+      <fieldset id="tunnel-hops" class="hidden">
+        <legend>SSH hops — psql connects to the DB through this chain, in order</legend>
+        <p class="tunnel-note">Host and port above must be the DB as seen <strong>from the last bastion</strong> (e.g. internal DNS, private IP) — not from your browser.</p>
+        <div id="tunnel-hops-list"></div>
+        <div class="tunnel-hops-actions">
+          <button type="button" id="btn-add-hop" class="tunnel-add-btn">+ Add hop</button>
+          <button type="button" id="btn-manage-bastions" class="tunnel-add-btn">Manage bastions…</button>
+        </div>
+      </fieldset>
+
       <input type="hidden" name="id" value="">
       <div class="dialog-actions">
         <button type="button" id="btn-cancel">Cancel</button>
