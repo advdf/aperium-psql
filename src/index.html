@@ -18,6 +18,10 @@
   <script src="/static/src/api.js"></script>
 </head>
 <body>
+  <!-- Mobile sidebar toggle (hidden on desktop via CSS) -->
+  <button id="sidebar-toggle" class="sidebar-toggle" aria-label="Toggle connections sidebar" aria-expanded="false">&#9776;</button>
+  <div id="sidebar-backdrop" class="sidebar-backdrop" aria-hidden="true"></div>
+
   <!-- Sidebar -->
   <aside id="sidebar">
     <div class="sidebar-header">
@@ -201,5 +205,28 @@
   </dialog>
 
   <script src="/static/dist/renderer.bundle.js"></script>
+  <script>
+    // Mobile sidebar drawer: toggle, backdrop, auto-close on connection pick
+    (function () {
+      const body = document.body;
+      const toggle = document.getElementById('sidebar-toggle');
+      const backdrop = document.getElementById('sidebar-backdrop');
+      const connList = document.getElementById('connection-list');
+      const mq = window.matchMedia('(max-width: 640px)');
+      const setOpen = (open) => {
+        body.classList.toggle('sidebar-open', open);
+        toggle.setAttribute('aria-expanded', String(open));
+      };
+      toggle.addEventListener('click', () => setOpen(!body.classList.contains('sidebar-open')));
+      backdrop.addEventListener('click', () => setOpen(false));
+      connList.addEventListener('click', (e) => {
+        if (!mq.matches) return;
+        if (e.target.closest('.conn-item') && !e.target.closest('.conn-item-actions')) {
+          setOpen(false);
+        }
+      });
+      mq.addEventListener('change', (e) => { if (!e.matches) setOpen(false); });
+    })();
+  </script>
 </body>
 </html>

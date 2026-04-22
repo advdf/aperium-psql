@@ -1370,3 +1370,138 @@ dialog select:focus {
 ::-webkit-scrollbar-thumb:hover {
   background: var(--text-dim);
 }
+
+/* ============================================================
+   Mobile sidebar toggle (hidden on desktop)
+   ============================================================ */
+.sidebar-toggle {
+  display: none;
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 250;
+  width: 44px;
+  height: 34px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-overlay);
+  color: var(--text);
+  border-radius: 0;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  transition: transform 0.2s ease, background 0.15s;
+}
+.sidebar-toggle:hover { background: var(--bg-surface); }
+
+.sidebar-backdrop {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 150;
+  backdrop-filter: blur(2px);
+}
+
+/* ============================================================
+   Tablet (≤ 900px)
+   ============================================================ */
+@media (max-width: 900px) {
+  :root { --sidebar-w: 200px; }
+
+  #editor-toolbar,
+  #results-toolbar {
+    height: auto;
+    min-height: var(--toolbar-h);
+    padding-top: 4px;
+    padding-bottom: 4px;
+    flex-wrap: wrap;
+    row-gap: 4px;
+  }
+  .editor-actions,
+  .results-right { flex-wrap: wrap; row-gap: 4px; }
+
+  .tab { max-width: 160px; padding: 0 10px; }
+}
+
+/* ============================================================
+   Mobile (≤ 640px) — sidebar becomes a drawer
+   ============================================================ */
+@media (max-width: 640px) {
+  body { font-size: 14px; }
+
+  #sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: 80vw;
+    max-width: 320px;
+    min-width: 0;
+    transform: translateX(-100%);
+    transition: transform 0.2s ease;
+    z-index: 200;
+    box-shadow: 4px 0 16px rgba(0, 0, 0, 0.4);
+  }
+  body.sidebar-open #sidebar { transform: translateX(0); }
+  body.sidebar-open .sidebar-backdrop { display: block; }
+
+  .sidebar-header { padding-top: 16px; }
+
+  .sidebar-toggle { display: flex; }
+  body.sidebar-open .sidebar-toggle {
+    transform: translateX(min(calc(80vw - 44px), 276px));
+  }
+
+  /* Make room for the hamburger in the tab/welcome area */
+  #tab-bar { padding-left: 44px; }
+  #welcome { padding: 56px 16px 24px; }
+  .welcome-content h2 { font-size: 22px; }
+
+  /* Panels: keep editor usable, let other panels breathe */
+  #editor-panel { height: 220px; min-height: 120px; }
+  #results-panel { min-height: 140px; }
+  #terminal-panel { min-height: 140px; }
+
+  /* Touch: resize handles are mouse-only, hide them */
+  .resize-handle { display: none; }
+
+  /* Editor toolbar: wrap, shrink, drop niche button */
+  .editor-actions { gap: 4px; }
+  .editor-actions button { padding: 4px 8px; font-size: 11px; }
+  .editor-actions #db-selector { max-width: 120px; font-size: 11px; }
+  .auto-refresh-wrapper { display: none; }
+
+  /* Results toolbar: condense */
+  .results-right { gap: 4px; }
+  .results-btn { padding: 4px 8px; font-size: 11px; }
+
+  /* Snippets dropdown: anchor left so it stays on-screen */
+  .snippets-menu {
+    right: auto;
+    left: 0;
+    min-width: min(90vw, 320px);
+    max-width: 90vw;
+  }
+
+  /* Tabs: tighter */
+  .tab { max-width: 140px; padding: 0 10px; font-size: 11px; }
+
+  /* Connection dialog: near full width */
+  dialog {
+    width: calc(100vw - 24px);
+    max-width: 420px;
+    padding: 20px;
+  }
+
+  /* ERD overlay: full viewport */
+  #erd-toolbar { flex-wrap: wrap; row-gap: 4px; height: auto; padding: 6px 8px; }
+
+  /* Larger tap targets */
+  .conn-item { padding: 10px 12px; }
+  .conn-group-header { padding: 8px 10px; }
+}
+
