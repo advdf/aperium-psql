@@ -1,0 +1,21 @@
+.git
+.gitignore
+.claude
+node_modules
+dist
+data
+*.iconset
+Aperium PSQL-darwin-arm64
+Aperium PSQL-darwin-x64
+aperium-psql-linux-x64
+aperium-psql-linux-arm64
+assets/icon.iconset
+assets/icon_rounded.png
+assets/icon_macos.png
+assets/icon.icns
+aperium.log
+CLAUDE.md
+README.md
+.dockerignore
+Dockerfile
+docker-compose.yml

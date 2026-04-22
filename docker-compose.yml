@@ -1,0 +1,30 @@
+services:
+  aperium:
+    build: .
+    image: aperium-psql:latest
+    container_name: aperium-psql
+    ports:
+      - "8088:8080"
+    volumes:
+      - ./data:/data
+    environment:
+      - APERIUM_DATA_DIR=/data
+      - PORT=8080
+      - TZ=${TZ:-UTC}
+    depends_on:
+      - postgres
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16
+    container_name: aperium-postgres
+    ports:
+      - "5433:5432"
+    environment:
+      - POSTGRES_USER=aperium
+      - POSTGRES_PASSWORD=aperium
+      - POSTGRES_DB=aperium
+    volumes:
+      - ./data/pg:/var/lib/postgresql/data
+      - ./scripts/init-postgres.sql:/docker-entrypoint-initdb.d/01-seed.sql:ro
+    restart: unless-stopped
