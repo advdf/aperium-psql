@@ -198,6 +198,8 @@
         body: JSON.stringify(bastions),
       }).then((r) => r.json()),
 
+    listKeys: () => fetch('/api/keys').then((r) => r.json()),
+
     openSnippetsInEditor: async () => {
       const current = await api.loadSnippets();
       if (!current) return { needsInit: true, path: 'snippets.json' };

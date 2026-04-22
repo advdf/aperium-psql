@@ -1,5 +1,52 @@
 # Changelog
 
+## Unreleased — Key paths + backups
+
+Follow-up to the SSH-tunnel work: SSH private keys are no longer stored
+inline in `bastions.json`. They're referenced by **path inside the
+container** and read fresh at tunnel-open time. A dedicated keys volume
+(`./keys:/keys:ro` by default) carries the actual files. Combined with a
+new backup dialog, this means exports no longer leak SSH key material.
+
+### Key paths, not key content
+
+- `bastions.json` drops `privateKey` in favour of `privateKeyPath` (e.g.
+  `/keys/prod-bastion_id_rsa`). The server's `resolveHops()` reads the
+  file at call time with clean errors for `ENOENT` / `EACCES` / empty
+  file, prefixed with the failing hop for quick diagnosis.
+- `GET /api/keys` lists regular files in `APERIUM_KEYS_DIR` (default
+  `/keys`), filtering `.pub` files and dotfiles. The bastion editor
+  surfaces this as a dropdown instead of a free-text field — typos
+  gone, missing files flagged as `<path> (missing)` in the list.
+- `docker-compose.yml` now mounts `./keys:/keys:ro`. `./keys/` is
+  `.gitignore`d. Re-export `APERIUM_KEYS_DIR` to relocate if the default
+  path doesn't fit.
+- Legacy `privateKey` inline content is still honoured for bastions
+  created before the pivot, with a yellow "legacy inline key" banner
+  in the editor. New bastions *must* use `privateKeyPath`.
+- A single key file can be shared by any number of bastions in the
+  chain — typical multi-hop setups keep one key per identity in
+  `./keys/` and reference it from every bastion that uses that
+  identity. README has a worked example.
+
+### Backup & restore
+
+- New ⇵ button in the sidebar opens a backup dialog. *Download JSON*
+  and *Download YAML* export the combined `{ connections, bastions }`
+  object with a `version: 1` header; *Choose file…* imports a backup
+  merge-by-id (existing ids overwrite, new ids add, existing entries
+  not in the file are kept).
+- YAML support via `js-yaml` bundled into the renderer by esbuild.
+- Because bastions carry only key *paths*, exports are safe to keep
+  around for config sync. Postgres passwords still travel in plain
+  text, so the usual care applies — the dialog warns explicitly.
+
+### Safety
+
+- psql now always runs with `-w` / `--no-password`. Missing or wrong
+  passwords fail fast with a clear error instead of hanging forever
+  on a TTY prompt read that node's pipe will never satisfy.
+
 ## Unreleased — Web app pivot + SSH tunnels
 
 This release replaces the Electron desktop app with a Node + browser web app

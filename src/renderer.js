@@ -1,4 +1,5 @@
 import { createEditor, updateSchema } from './editor.js';
+import yaml from 'js-yaml';
 
 // xterm loaded via <script> tags before this bundle
 const XTerminal = window._Terminal;
@@ -1770,6 +1771,7 @@ btnImport.addEventListener('click', async () => {
 
 // ---- SSH bastions store (in-memory copy of /api/bastions) ----
 let bastionsCache = [];
+let keysCache = { dir: '/keys', files: [], error: null };
 
 async function loadBastionsCache() {
   try {
@@ -1779,6 +1781,16 @@ async function loadBastionsCache() {
     bastionsCache = [];
   }
   return bastionsCache;
+}
+
+async function loadKeysCache() {
+  try {
+    const res = await window.api.listKeys();
+    keysCache = { dir: res.dir || '/keys', files: Array.isArray(res.files) ? res.files : [], error: res.error || null };
+  } catch (err) {
+    keysCache = { dir: '/keys', files: [], error: err.message };
+  }
+  return keysCache;
 }
 
 function bastionSummary(b) {
@@ -1911,107 +1923,314 @@ btnAddHop.addEventListener('click', () => {
 
 btnManageBastions.addEventListener('click', () => openBastionsManager());
 
-// ---- Bastions manager dialog ----
+// ---- Bastions manager dialog (master-detail) ----
 const bastionsDialog = document.getElementById('bastions-dialog');
-const bastionsList = document.getElementById('bastions-list');
+const bastionsListView = document.getElementById('bastions-list-view');
+const bastionDetailForm = document.getElementById('bastion-detail-form');
+const bastionDetailTitle = document.getElementById('bastion-detail-title');
 const btnNewBastion = document.getElementById('btn-new-bastion');
-const btnBastionsCancel = document.getElementById('btn-bastions-cancel');
-const btnBastionsSave = document.getElementById('btn-bastions-save');
+const btnBastionsClose = document.getElementById('btn-bastions-close');
+const btnBastionBack = document.getElementById('btn-bastion-back');
+const btnBastionCancel = document.getElementById('btn-bastion-cancel');
+const btnBastionSave = document.getElementById('btn-bastion-save');
+const btnBastionDelete = document.getElementById('btn-bastion-delete');
 
-// Working copy so Cancel discards in-dialog edits
-let bastionsDraft = [];
+// Which bastion is being edited in the detail view (id string), or the special
+// sentinel '__new__' for an unsaved new entry. null when list view is active.
+let editingBastionId = null;
 
-function renderBastionRow(b) {
-  const row = document.createElement('div');
-  row.className = 'bastion-row';
-  row.dataset.id = b.id;
-  row.innerHTML = `
-    <div class="bastion-row-header">
-      <input type="text" data-field="name" placeholder="Name (e.g. Prod bastion)">
-      <button type="button" class="bastion-delete" title="Delete">&times;</button>
-    </div>
-    <div class="bastion-row-fields">
+function showBastionsView(view) {
+  bastionsDialog.querySelectorAll('.bastions-view').forEach((s) => {
+    s.classList.toggle('hidden', s.dataset.view !== view);
+  });
+}
+
+function bastionSummaryLine(b) {
+  const host = b.host || '?';
+  const user = b.user || '?';
+  const port = b.port && String(b.port) !== '22' ? `:${b.port}` : '';
+  return `${user}@${host}${port}`;
+}
+
+function renderBastionsListView() {
+  bastionsListView.innerHTML = '';
+  if (bastionsCache.length === 0) {
+    const empty = document.createElement('p');
+    empty.className = 'bastions-empty';
+    empty.textContent = 'No bastions yet. Click + New bastion below.';
+    bastionsListView.appendChild(empty);
+    return;
+  }
+  for (const b of bastionsCache) {
+    const row = document.createElement('div');
+    row.className = 'bastion-list-row';
+    row.dataset.id = b.id;
+    row.innerHTML = `
+      <div class="bastion-list-row-text">
+        <div class="bastion-list-row-name"></div>
+        <div class="bastion-list-row-sub"></div>
+      </div>
+      <span class="bastion-list-row-chevron">&rsaquo;</span>
+    `;
+    row.querySelector('.bastion-list-row-name').textContent = b.name || '(unnamed)';
+    row.querySelector('.bastion-list-row-sub').textContent = bastionSummaryLine(b);
+    row.addEventListener('click', () => openBastionDetail(b.id));
+    bastionsListView.appendChild(row);
+  }
+}
+
+function buildKeySelect(currentPath) {
+  const select = document.createElement('select');
+  select.dataset.field = 'privateKeyPath';
+  const empty = document.createElement('option');
+  empty.value = '';
+  empty.textContent = keysCache.files.length ? '— pick a key file —' : `— no files in ${keysCache.dir} —`;
+  select.appendChild(empty);
+  for (const p of keysCache.files) {
+    const opt = document.createElement('option');
+    opt.value = p;
+    opt.textContent = p;
+    if (p === currentPath) opt.selected = true;
+    select.appendChild(opt);
+  }
+  if (currentPath && !keysCache.files.includes(currentPath)) {
+    const missing = document.createElement('option');
+    missing.value = currentPath;
+    missing.textContent = `${currentPath} (missing)`;
+    missing.selected = true;
+    select.appendChild(missing);
+  }
+  return select;
+}
+
+function renderBastionDetailForm(b) {
+  const hasLegacyInlineKey = !b.privateKeyPath && !!b.privateKey;
+  bastionDetailForm.innerHTML = `
+    <div class="bastion-detail-fields">
+      <label>Name <input type="text" data-field="name" placeholder="e.g. Prod bastion"></label>
       <label>Host <input type="text" data-field="host" placeholder="bastion.example.com"></label>
       <label>Port <input type="number" data-field="port" value="22"></label>
       <label>User <input type="text" data-field="user" placeholder="jump"></label>
-      <label>Private key (PEM or OpenSSH)
-        <textarea data-field="privateKey" rows="5" spellcheck="false" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea>
-      </label>
+      <label class="bastion-key-label">Private key file</label>
+      <p class="bastion-key-hint">Files in <code class="keys-dir"></code> on the server. Drop your SSH key into the mounted volume, then pick it from the list (public-key files and hidden files are excluded).</p>
+      ${hasLegacyInlineKey ? '<p class="bastion-key-legacy">⚠ This bastion still stores the private key inline (legacy). Save its content to a mounted file and pick it above; leaving the selection empty keeps the legacy inline key working.</p>' : ''}
       <label>Passphrase (optional)
         <input type="password" data-field="passphrase" autocomplete="new-password">
       </label>
     </div>
   `;
-  row.querySelector('[data-field=name]').value = b.name || '';
-  row.querySelector('[data-field=host]').value = b.host || '';
-  row.querySelector('[data-field=port]').value = b.port != null ? String(b.port) : '22';
-  row.querySelector('[data-field=user]').value = b.user || '';
-  row.querySelector('[data-field=privateKey]').value = b.privateKey || '';
-  row.querySelector('[data-field=passphrase]').value = b.passphrase || '';
-  row.querySelector('.bastion-delete').addEventListener('click', () => {
-    row.remove();
-  });
-  return row;
+  bastionDetailForm.querySelector('[data-field=name]').value = b.name || '';
+  bastionDetailForm.querySelector('[data-field=host]').value = b.host || '';
+  bastionDetailForm.querySelector('[data-field=port]').value = b.port != null ? String(b.port) : '22';
+  bastionDetailForm.querySelector('[data-field=user]').value = b.user || '';
+  bastionDetailForm.querySelector('[data-field=passphrase]').value = b.passphrase || '';
+  bastionDetailForm.querySelector('.keys-dir').textContent = keysCache.dir;
+  const label = bastionDetailForm.querySelector('.bastion-key-label');
+  label.appendChild(buildKeySelect(b.privateKeyPath || ''));
+  bastionDetailForm.dataset.legacyKey = b.privateKey || '';
+  bastionDetailForm.dataset.id = b.id;
+  bastionDetailForm.querySelector('[data-field=name]').focus();
 }
 
-function renderBastionsList() {
-  bastionsList.innerHTML = '';
-  if (bastionsDraft.length === 0) {
-    const empty = document.createElement('p');
-    empty.className = 'bastions-empty';
-    empty.textContent = 'No bastions yet. Click + New bastion.';
-    bastionsList.appendChild(empty);
-    return;
+function readBastionDetailForm() {
+  const b = {
+    id: bastionDetailForm.dataset.id,
+    name: bastionDetailForm.querySelector('[data-field=name]').value.trim(),
+    host: bastionDetailForm.querySelector('[data-field=host]').value.trim(),
+    port: bastionDetailForm.querySelector('[data-field=port]').value.trim() || '22',
+    user: bastionDetailForm.querySelector('[data-field=user]').value.trim(),
+    privateKeyPath: bastionDetailForm.querySelector('[data-field=privateKeyPath]').value.trim(),
+    passphrase: bastionDetailForm.querySelector('[data-field=passphrase]').value,
+  };
+  const legacy = bastionDetailForm.dataset.legacyKey;
+  if (!b.privateKeyPath && legacy) b.privateKey = legacy;
+  return b;
+}
+
+function openBastionDetail(id) {
+  let b, isNew = false;
+  if (id === '__new__') {
+    b = { id: crypto.randomUUID(), name: '', host: '', port: '22', user: '', privateKeyPath: '', passphrase: '' };
+    isNew = true;
+  } else {
+    b = bastionsCache.find((x) => x.id === id);
+    if (!b) return;
   }
-  bastionsDraft.forEach((b) => bastionsList.appendChild(renderBastionRow(b)));
+  editingBastionId = isNew ? '__new__' : id;
+  bastionDetailForm.dataset.isNew = String(isNew);
+  bastionDetailTitle.textContent = isNew ? 'New bastion' : 'Edit bastion';
+  btnBastionDelete.style.display = isNew ? 'none' : '';
+  renderBastionDetailForm(b);
+  showBastionsView('detail');
 }
 
-async function openBastionsManager() {
-  await loadBastionsCache();
-  // Deep copy for the draft
-  bastionsDraft = bastionsCache.map((b) => ({ ...b }));
-  renderBastionsList();
-  bastionsDialog.showModal();
+function backToList() {
+  editingBastionId = null;
+  renderBastionsListView();
+  showBastionsView('list');
 }
 
-btnNewBastion.addEventListener('click', () => {
-  const nb = { id: crypto.randomUUID(), name: '', host: '', port: '22', user: '', privateKey: '', passphrase: '' };
-  bastionsDraft.push(nb);
-  // Remove empty-state paragraph if present
-  bastionsList.querySelector('.bastions-empty')?.remove();
-  bastionsList.appendChild(renderBastionRow(nb));
-  bastionsList.lastElementChild.scrollIntoView({ block: 'nearest' });
-  bastionsList.lastElementChild.querySelector('[data-field=name]').focus();
-});
-
-btnBastionsCancel.addEventListener('click', () => {
-  bastionsDialog.close();
-});
-
-btnBastionsSave.addEventListener('click', async () => {
-  // Read DOM into draft (preserving ids)
-  const rows = Array.from(bastionsList.querySelectorAll('.bastion-row'));
-  const next = rows.map((row) => ({
-    id: row.dataset.id,
-    name: row.querySelector('[data-field=name]').value.trim(),
-    host: row.querySelector('[data-field=host]').value.trim(),
-    port: row.querySelector('[data-field=port]').value.trim() || '22',
-    user: row.querySelector('[data-field=user]').value.trim(),
-    privateKey: row.querySelector('[data-field=privateKey]').value,
-    passphrase: row.querySelector('[data-field=passphrase]').value,
-  }));
-  for (const b of next) {
-    if (!b.name) { alert('Every bastion needs a name.'); return; }
-    if (!b.host || !b.user || !b.privateKey) { alert(`Bastion "${b.name}" is missing host, user or private key.`); return; }
-  }
-  await window.api.saveBastions(next);
-  bastionsCache = next;
+async function persistBastions() {
+  await window.api.saveBastions(bastionsCache);
   // Refresh hop pickers in the (still-open) connection dialog
   tunnelHopsList.querySelectorAll('.tunnel-hop-picker').forEach((sel) => {
     const cur = sel.value;
     renderHopPickerOptions(sel, cur);
   });
-  bastionsDialog.close();
+}
+
+async function openBastionsManager() {
+  await Promise.all([loadBastionsCache(), loadKeysCache()]);
+  backToList();
+  bastionsDialog.showModal();
+}
+
+btnNewBastion.addEventListener('click', () => openBastionDetail('__new__'));
+
+btnBastionBack.addEventListener('click', backToList);
+btnBastionCancel.addEventListener('click', backToList);
+
+btnBastionsClose.addEventListener('click', () => bastionsDialog.close());
+
+btnBastionSave.addEventListener('click', async () => {
+  const b = readBastionDetailForm();
+  if (!b.name) { alert('Name is required.'); return; }
+  if (!b.host || !b.user) { alert('Host and user are required.'); return; }
+  if (!b.privateKeyPath && !b.privateKey) {
+    alert('Pick a private key file from the list. Drop the file into the mounted keys directory if it isn\u2019t there yet.');
+    return;
+  }
+  const isNew = bastionDetailForm.dataset.isNew === 'true';
+  if (isNew) {
+    bastionsCache.push(b);
+  } else {
+    const idx = bastionsCache.findIndex((x) => x.id === b.id);
+    if (idx >= 0) bastionsCache[idx] = b; else bastionsCache.push(b);
+  }
+  await persistBastions();
+  backToList();
+});
+
+btnBastionDelete.addEventListener('click', async () => {
+  const isNew = bastionDetailForm.dataset.isNew === 'true';
+  if (isNew) { backToList(); return; }
+  const id = bastionDetailForm.dataset.id;
+  const b = bastionsCache.find((x) => x.id === id);
+  if (!b) { backToList(); return; }
+  if (!confirm(`Delete bastion "${b.name}"? Connections referencing it will break until the hop is repointed.`)) return;
+  bastionsCache = bastionsCache.filter((x) => x.id !== id);
+  await persistBastions();
+  backToList();
+});
+
+// ---- Backup / restore (connections + bastions, JSON or YAML) ----
+const backupDialog = document.getElementById('backup-dialog');
+const btnBackup = document.getElementById('btn-backup');
+const btnBackupExportJson = document.getElementById('btn-backup-export-json');
+const btnBackupExportYaml = document.getElementById('btn-backup-export-yaml');
+const btnImportBackup = document.getElementById('btn-import-backup');
+const btnBackupClose = document.getElementById('btn-backup-close');
+const backupImportStatus = document.getElementById('backup-import-status');
+
+async function gatherBackupPayload() {
+  const [conns, basts] = await Promise.all([
+    window.api.listConnections(),
+    window.api.listBastions(),
+  ]);
+  return {
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    connections: conns,
+    bastions: basts,
+  };
+}
+
+function triggerDownload(content, filename, mime) {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function mergeById(current, incoming) {
+  const byId = new Map(current.map((x) => [x.id, x]));
+  for (const item of incoming) {
+    const copy = { ...item };
+    if (!copy.id) copy.id = crypto.randomUUID();
+    byId.set(copy.id, copy);
+  }
+  return Array.from(byId.values());
+}
+
+btnBackup.addEventListener('click', () => {
+  backupImportStatus.textContent = '';
+  backupDialog.showModal();
+});
+
+btnBackupClose.addEventListener('click', () => backupDialog.close());
+
+btnBackupExportJson.addEventListener('click', async () => {
+  const payload = await gatherBackupPayload();
+  const name = `aperium-backup-${new Date().toISOString().slice(0, 10)}.json`;
+  triggerDownload(JSON.stringify(payload, null, 2), name, 'application/json');
+});
+
+btnBackupExportYaml.addEventListener('click', async () => {
+  const payload = await gatherBackupPayload();
+  const name = `aperium-backup-${new Date().toISOString().slice(0, 10)}.yaml`;
+  const text = yaml.dump(payload, { lineWidth: -1, noRefs: true, quotingType: '"' });
+  triggerDownload(text, name, 'application/x-yaml');
+});
+
+btnImportBackup.addEventListener('click', async () => {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = '.json,.yaml,.yml,application/json,application/x-yaml,text/yaml';
+  input.addEventListener('change', async () => {
+    const file = input.files && input.files[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      let parsed;
+      const ext = file.name.toLowerCase().split('.').pop();
+      if (ext === 'yaml' || ext === 'yml') {
+        parsed = yaml.load(text);
+      } else {
+        try { parsed = JSON.parse(text); }
+        catch { parsed = yaml.load(text); }
+      }
+      if (!parsed || typeof parsed !== 'object') throw new Error('Backup file has no usable root object.');
+      const importedConns = Array.isArray(parsed.connections) ? parsed.connections : [];
+      const importedBasts = Array.isArray(parsed.bastions) ? parsed.bastions : [];
+      if (importedConns.length === 0 && importedBasts.length === 0) {
+        throw new Error('No connections or bastions found in the file.');
+      }
+      const [currConns, currBasts] = await Promise.all([
+        window.api.listConnections(),
+        window.api.listBastions(),
+      ]);
+      const mergedConns = mergeById(currConns, importedConns);
+      const mergedBasts = mergeById(currBasts, importedBasts);
+      await Promise.all([
+        window.api.saveConnections(mergedConns),
+        window.api.saveBastions(mergedBasts),
+      ]);
+      connections = mergedConns;
+      bastionsCache = mergedBasts;
+      renderConnections();
+      backupImportStatus.textContent = `Imported ${importedConns.length} connection(s) and ${importedBasts.length} bastion(s).`;
+      backupImportStatus.style.color = 'var(--green)';
+    } catch (err) {
+      backupImportStatus.textContent = `Import failed: ${err.message}`;
+      backupImportStatus.style.color = 'var(--red)';
+    }
+  });
+  input.click();
 });
 
 // ---- New connection dialog ----

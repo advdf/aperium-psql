@@ -12,16 +12,52 @@ function loadBastions() {
   catch { return []; }
 }
 
+function readPrivateKey(p, ctx) {
+  if (!p) throw new Error(`${ctx}: no private key path`);
+  let content;
+  try {
+    content = fs.readFileSync(p, 'utf-8');
+  } catch (err) {
+    if (err.code === 'ENOENT') throw new Error(`${ctx}: private key file not found: ${p}`);
+    if (err.code === 'EACCES') throw new Error(`${ctx}: cannot read private key (permission denied): ${p}`);
+    throw new Error(`${ctx}: cannot read private key ${p}: ${err.message}`);
+  }
+  if (!content.trim()) throw new Error(`${ctx}: private key file is empty: ${p}`);
+  return content;
+}
+
 function resolveHops(hops) {
   const bastions = loadBastions();
   const byId = new Map(bastions.map((b) => [b.id, b]));
   return hops.map((hop, i) => {
-    if (hop && hop.bastionId) {
-      const b = byId.get(hop.bastionId);
-      if (!b) throw new Error(`hop ${i + 1}: bastion ${hop.bastionId} not found`);
-      return { host: b.host, port: b.port, user: b.user, privateKey: b.privateKey, passphrase: b.passphrase };
+    const ctx = `hop ${i + 1}`;
+    const source = hop && hop.bastionId ? byId.get(hop.bastionId) : hop;
+    if (hop && hop.bastionId && !source) {
+      throw new Error(`${ctx}: bastion ${hop.bastionId} not found`);
     }
-    return hop;
+    if (!source || !source.host || !source.user) {
+      throw new Error(`${ctx}: host and user are required`);
+    }
+    const keyPath = source.privateKeyPath;
+    // Legacy fallback: inline privateKey content stored directly in the bastion
+    // (pre-volume-mount layout). Kept working so old configs don't break, but
+    // new bastions must use privateKeyPath so the key never ends up in
+    // bastions.json / backups.
+    let privateKey;
+    if (keyPath) {
+      privateKey = readPrivateKey(keyPath, `${ctx} (${source.host})`);
+    } else if (source.privateKey) {
+      privateKey = source.privateKey;
+    } else {
+      throw new Error(`${ctx} (${source.host}): privateKeyPath is required`);
+    }
+    return {
+      host: source.host,
+      port: source.port,
+      user: source.user,
+      privateKey,
+      passphrase: source.passphrase,
+    };
   });
 }
 
@@ -37,6 +73,7 @@ async function maybeOpenTunnel(connection) {
 }
 
 const DATA_DIR = process.env.APERIUM_DATA_DIR || path.join(__dirname, '..', 'data');
+const KEYS_DIR = process.env.APERIUM_KEYS_DIR || '/keys';
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
 const PSQL_CANDIDATE_PATHS = ['/usr/bin/psql', '/usr/local/bin/psql'];
@@ -141,6 +178,23 @@ app.put('/api/snippets', (req, res) => {
 
 app.get('/api/bastions', (_req, res) => {
   res.json(loadBastions());
+});
+
+app.get('/api/keys', (_req, res) => {
+  try {
+    const entries = fs.readdirSync(KEYS_DIR, { withFileTypes: true });
+    const files = entries
+      .filter((e) => e.isFile())
+      .map((e) => e.name)
+      // Exclude public keys and hidden files — they're never what we want.
+      .filter((n) => !n.endsWith('.pub') && !n.startsWith('.'))
+      .sort()
+      .map((n) => path.posix.join(KEYS_DIR.replace(/\\/g, '/'), n));
+    res.json({ dir: KEYS_DIR, files });
+  } catch (err) {
+    if (err.code === 'ENOENT') return res.json({ dir: KEYS_DIR, files: [], error: `keys dir not found: ${KEYS_DIR}` });
+    res.status(500).json({ dir: KEYS_DIR, files: [], error: err.message });
+  }
 });
 
 app.put('/api/bastions', (req, res) => {

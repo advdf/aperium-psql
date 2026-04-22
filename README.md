@@ -12,7 +12,8 @@ A clean, modern PostgreSQL client served as a **web app**. Combines a real `psql
 - **Sidebar search** — filter by name, host, group or database; groups auto-expand on matches
 - **Import** connections from a JSON or CSV file (with dedup by `host:port/database@user`)
 - **Duplicate** a connection, or **open in a new tab** (`+` button or Cmd/Ctrl+click)
-- **SSH tunnel (multi-hop)** — connect through an arbitrary chain of bastions (1, 2, 3+ hops). Each hop authenticates with a private key (PEM / OpenSSH), optionally passphrase-protected. Implemented as local port forwarding: the server opens the SSH chain, binds `127.0.0.1:<ephemeral>` as the tunnel exit, and `psql` connects to that — so `PGPASSWORD`, CSV parsing, PTY prompt and SIGTERM cancellation all behave exactly as for a direct connection.
+- **SSH tunnel (multi-hop)** — connect through an arbitrary chain of bastions (1, 2, 3+ hops). Each hop authenticates with a private key (PEM / OpenSSH), optionally passphrase-protected. The **key content never touches Aperium's config** — bastions store only the key's *path inside the container*, and the operator mounts the actual key file as a Docker volume (e.g. `-v ~/.ssh:/keys:ro`). Implemented as local port forwarding: the server opens the SSH chain, binds `127.0.0.1:<ephemeral>` as the tunnel exit, and `psql` connects to that — so `PGPASSWORD`, CSV parsing, PTY prompt and SIGTERM cancellation all behave exactly as for a direct connection.
+- **Backup & restore** — export every connection and bastion as a single JSON or YAML file, re-import anywhere. Because bastions reference keys by path, the backup file contains no secret material for SSH (Postgres passwords still travel in plain text, so store the file securely).
 
 ### Tabs
 - Each tab owns its own terminal, editor, results panel and `psql` PTY session
@@ -89,16 +90,80 @@ From inside the container, the host is reachable at:
 - **Docker Desktop (macOS/Windows WSL2)**: `host.docker.internal`
 - **Linux**: add `extra_hosts: ["host.docker.internal:host-gateway"]` to the `aperium` service in `docker-compose.yml`, or point the connection at the host's LAN IP.
 
+### Mounting SSH keys (and reusing them across hops)
+
+Aperium references private keys by **path inside the container**, so the key
+file itself is never stored in `bastions.json` or included in backups. The
+default compose file mounts `./keys` read-only at `/keys`:
+
+```yaml
+    volumes:
+      - ./keys:/keys:ro
+```
+
+Drop each SSH key into `./keys/` on the host, give it a stable name, and
+reference it from *Manage bastions…* — the **Private key** field is a
+dropdown populated from the live directory listing (public-key `.pub`
+files and dotfiles are filtered out). The path you pick is what
+`bastions.json` stores; the key content itself never leaves the mounted
+volume.
+
+**Tip for multi-hop (`ProxyJump`) setups.** A key is a file, not a bastion,
+so a single file can be shared by any number of bastions in the chain.
+For example, a typical two-identity jump (your personal key for the outer
+infra, a shared-account key for the inner infra):
+
+```
+./keys/
+├── robin_id_rsa        # your laptop's ~/.ssh/id_rsa
+└── support_id_rsa      # shared-account key recovered from the bastion
+```
+
+Bastions then reference the same file wherever the same user/identity is
+reused:
+
+| Bastion | Host | User | Private key |
+|---|---|---|---|
+| `dalibo-rp3`     | `online-rp3.dalibo.net`       | `robin`  | `/keys/robin_id_rsa`  |
+| `chabichou`      | `chabichou.client.dalibo.net` | `robin`  | `/keys/robin_id_rsa`  |
+| `ensam-jumphost` | `193.48.193.58`               | `dalibo` | `/keys/support_id_rsa`|
+| `ensam-pgsql-1`  | `10.209.8.146`                | `dalibo` | `/keys/support_id_rsa`|
+
+A connection's tunnel then composes these by id — `hops: [dalibo-rp3,
+chabichou, ensam-jumphost, ensam-pgsql-1]` — and the server reads each
+key fresh at tunnel-open time. Rotating the key is one `cp` on the host,
+no edits to connections or backups.
+
+Missing-key situations surface as clear errors:
+`SSH tunnel: hop 2 (10.209.8.146): private key file not found:
+/keys/support_id_rsa`. Permissions errors are reported the same way
+(`EACCES`).
+
+Override the keys dir with `APERIUM_KEYS_DIR=/somewhere/else` if you
+prefer a different mount point.
+
 ### Test bastion (SSH tunnel)
 
 The provided `docker-compose.yml` ships a three-service stack — `aperium`, a seeded `postgres:16`, and a `linuxserver/openssh-server` **bastion** — on two networks: `postgres` sits on `internal` only, so Aperium can't reach it directly and **must** go through the bastion. A fresh clone needs a test key:
 
 ```bash
 ssh-keygen -t ed25519 -f scripts/bastion_key -N '' -C 'aperium-bastion-test'
+# Expose the private key to the aperium container via the keys volume
+mkdir -p keys && cp scripts/bastion_key keys/bastion_test_key
 docker compose up -d
 ```
 
-Then in the UI, create a connection:
+Then in the UI, open *Manage bastions…* and create one:
+
+| Field | Value |
+|---|---|
+| Name | `test-bastion` |
+| Host | `bastion` |
+| Port | `2222` |
+| User | `jump` |
+| Private key path | `/keys/bastion_test_key` |
+
+Then create a connection:
 
 | Field | Value |
 |---|---|
@@ -108,11 +173,53 @@ Then in the UI, create a connection:
 | Password | `aperium` |
 | Database | `aperium` |
 | **Use SSH tunnel** | ✅ |
-| **Hop 1** | host `bastion`, port `2222`, user `jump`, private key = contents of `scripts/bastion_key`, no passphrase |
+| **Hop 1** | `test-bastion` (from the dropdown) |
 
-Add more hops (Hop 2 → bastion again, etc.) to exercise the multi-hop path. Keys and passphrases are stored in `./data/connections.json` **in plain text**, same contract as the Postgres password.
+Add more hops referencing the same bastion (or new ones) to exercise the multi-hop path.
+
+> Postgres passwords still live in `./data/connections.json` in plain text — same contract as before. Only the SSH key material has moved out of that file.
 
 To skip the tunnel entirely (direct connection), put `postgres` on the `public` network instead and expose `5432` as needed.
+
+### Backup & restore
+
+The sidebar's ⇵ button opens the backup dialog:
+
+- **Download JSON / Download YAML** — dumps every connection and bastion as
+  a single file. Bastions only carry their key *path*, so the backup is safe
+  to version-control (Postgres passwords still travel inside; redact if you
+  plan to commit).
+- **Choose file…** — imports a backup; items with an existing `id` are
+  overwritten, new ones are added, existing items absent from the file are
+  kept untouched.
+
+The backup format is stable (`version: 1` header). A minimal example:
+
+```yaml
+version: 1
+exportedAt: "2026-04-22T12:34:56Z"
+connections:
+  - id: 4f0e...
+    name: Prod DB
+    host: postgres.internal
+    port: "5432"
+    user: reader
+    password: hunter2
+    database: app
+    sslmode: ""
+    tunnel:
+      enabled: true
+      hops:
+        - bastionId: b-prod
+bastions:
+  - id: b-prod
+    name: Prod bastion
+    host: bastion.example.com
+    port: "22"
+    user: jump
+    privateKeyPath: /keys/prod-bastion_id_rsa
+    passphrase: ""
+```
 
 ### Remote deployment
 

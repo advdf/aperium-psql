@@ -27,7 +27,8 @@
     <div class="sidebar-header">
       <h1>Aperium</h1>
       <div class="sidebar-header-actions">
-        <button id="btn-import" title="Import connections from file">&#8615;</button>
+        <button id="btn-backup" title="Backup / restore (JSON or YAML)">&#8693;</button>
+        <button id="btn-import" title="Import connections from CSV/JSON">&#8615;</button>
         <button id="btn-new-connection" title="New connection">+</button>
       </div>
     </div>
@@ -151,16 +152,66 @@
     </div>
   </main>
 
+  <!-- Backup / restore dialog -->
+  <dialog id="backup-dialog" class="backup-dialog">
+    <h3>Backup &amp; restore</h3>
+    <p class="backup-warning">
+      <strong>Heads up:</strong> the export includes your Postgres passwords and SSH private keys <em>in plain text</em>. Store the file somewhere safe.
+    </p>
+
+    <section class="backup-section">
+      <h4>Export</h4>
+      <p class="backup-hint">Downloads every connection and bastion as a single file.</p>
+      <div class="backup-buttons">
+        <button type="button" id="btn-backup-export-json" class="tunnel-add-btn">Download JSON</button>
+        <button type="button" id="btn-backup-export-yaml" class="tunnel-add-btn">Download YAML</button>
+      </div>
+    </section>
+
+    <section class="backup-section">
+      <h4>Import</h4>
+      <p class="backup-hint">
+        Accepts the same JSON or YAML format. Items with an <code>id</code> that already exists are overwritten; new ones are added. Existing items not in the file are kept.
+      </p>
+      <div class="backup-buttons">
+        <button type="button" id="btn-import-backup" class="tunnel-add-btn">Choose file…</button>
+        <span id="backup-import-status" class="backup-status"></span>
+      </div>
+    </section>
+
+    <div class="dialog-actions">
+      <button type="button" id="btn-backup-close">Close</button>
+    </div>
+  </dialog>
+
   <!-- Bastions manager dialog -->
   <dialog id="bastions-dialog" class="bastions-dialog">
-    <h3>SSH bastions</h3>
-    <p class="bastions-hint">Save reusable SSH hops. Referenced by connections via Hop dropdowns.</p>
-    <div id="bastions-list"></div>
-    <button type="button" id="btn-new-bastion" class="tunnel-add-btn">+ New bastion</button>
-    <div class="dialog-actions">
-      <button type="button" id="btn-bastions-cancel">Cancel</button>
-      <button type="button" id="btn-bastions-save">Save</button>
-    </div>
+    <!-- List view -->
+    <section class="bastions-view" data-view="list">
+      <h3>SSH bastions</h3>
+      <p class="bastions-hint">Reusable SSH hops, referenced from the Hop dropdowns in the connection dialog.</p>
+      <div id="bastions-list-view"></div>
+      <div class="dialog-actions">
+        <button type="button" id="btn-new-bastion" class="tunnel-add-btn">+ New bastion</button>
+        <span class="dialog-spacer"></span>
+        <button type="button" id="btn-bastions-close">Close</button>
+      </div>
+    </section>
+
+    <!-- Detail view (one bastion at a time) -->
+    <section class="bastions-view hidden" data-view="detail">
+      <header class="bastion-detail-header">
+        <button type="button" id="btn-bastion-back" class="bastion-back" title="Back to list">&larr;</button>
+        <h3 id="bastion-detail-title">Edit bastion</h3>
+      </header>
+      <div id="bastion-detail-form"></div>
+      <div class="dialog-actions">
+        <button type="button" id="btn-bastion-delete" class="bastion-delete-btn">Delete</button>
+        <span class="dialog-spacer"></span>
+        <button type="button" id="btn-bastion-cancel">Cancel</button>
+        <button type="button" id="btn-bastion-save">Save</button>
+      </div>
+    </section>
   </dialog>
 
   <!-- Connection dialog -->

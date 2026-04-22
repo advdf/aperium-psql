@@ -7,6 +7,9 @@ services:
       - "8088:8080"
     volumes:
       - ./data:/data
+      # SSH private keys referenced by bastions by path (e.g. /keys/my-key).
+      # Mount whatever key dir you need; read-only is recommended.
+      - ./keys:/keys:ro
     environment:
       - APERIUM_DATA_DIR=/data
       - PORT=8080
