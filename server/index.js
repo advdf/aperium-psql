@@ -166,7 +166,7 @@ app.post('/api/query', async (req, res) => {
     ? { ...connection, host: tunnel.localHost, port: String(tunnel.localPort) }
     : connection;
 
-  const args = ['--csv', '--no-psqlrc', '-c', String(query).trim(), ...buildPsqlArgs(effectiveConn)];
+  const args = ['--csv', '--no-psqlrc', '-w', '-c', String(query).trim(), ...buildPsqlArgs(effectiveConn)];
   const env = buildPsqlEnv(connection);
   log('executeQuery host:', connection.host, tunnel ? `(via tunnel -> 127.0.0.1:${tunnel.localPort})` : '', 'queryId:', queryId);
 
@@ -270,7 +270,7 @@ wss.on('connection', (ws, req) => {
           ? { ...connection, host: tunnel.localHost, port: String(tunnel.localPort) }
           : connection;
 
-        const args = buildPsqlArgs(effectiveConn);
+        const args = ['-w', ...buildPsqlArgs(effectiveConn)];
         const env = buildPsqlEnv(connection);
         env.PSQL_PAGER = 'cat';
         env.PAGER = 'cat';
