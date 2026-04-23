@@ -4,24 +4,31 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Aperium PSQL</title>
-  <link rel="stylesheet" href="../node_modules/@xterm/xterm/css/xterm.css">
-  <link rel="stylesheet" href="styles.css">
-  <script src="../node_modules/@xterm/xterm/lib/xterm.js"></script>
-  <script src="../node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
-  <script src="../node_modules/@xterm/addon-web-links/lib/addon-web-links.js"></script>
+  <link rel="icon" type="image/png" href="/static/assets/icon.png">
+  <link rel="stylesheet" href="/static/node_modules/@xterm/xterm/css/xterm.css">
+  <link rel="stylesheet" href="/static/src/styles.css">
+  <script src="/static/node_modules/@xterm/xterm/lib/xterm.js"></script>
+  <script src="/static/node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
+  <script src="/static/node_modules/@xterm/addon-web-links/lib/addon-web-links.js"></script>
   <script>
     window._Terminal = Terminal;
     window._FitAddon = FitAddon;
     window._WebLinksAddon = WebLinksAddon;
   </script>
+  <script src="/static/src/api.js"></script>
 </head>
 <body>
+  <!-- Mobile sidebar toggle (hidden on desktop via CSS) -->
+  <button id="sidebar-toggle" class="sidebar-toggle" aria-label="Toggle connections sidebar" aria-expanded="false">&#9776;</button>
+  <div id="sidebar-backdrop" class="sidebar-backdrop" aria-hidden="true"></div>
+
   <!-- Sidebar -->
   <aside id="sidebar">
     <div class="sidebar-header">
       <h1>Aperium</h1>
       <div class="sidebar-header-actions">
-        <button id="btn-import" title="Import connections from file">&#8615;</button>
+        <button id="btn-backup" title="Backup / restore (JSON or YAML)">&#8693;</button>
+        <button id="btn-import" title="Import connections from CSV/JSON">&#8615;</button>
         <button id="btn-new-connection" title="New connection">+</button>
       </div>
     </div>
@@ -145,6 +152,68 @@
     </div>
   </main>
 
+  <!-- Backup / restore dialog -->
+  <dialog id="backup-dialog" class="backup-dialog">
+    <h3>Backup &amp; restore</h3>
+    <p class="backup-warning">
+      <strong>Heads up:</strong> the export includes your Postgres passwords and SSH private keys <em>in plain text</em>. Store the file somewhere safe.
+    </p>
+
+    <section class="backup-section">
+      <h4>Export</h4>
+      <p class="backup-hint">Downloads every connection and bastion as a single file.</p>
+      <div class="backup-buttons">
+        <button type="button" id="btn-backup-export-json" class="tunnel-add-btn">Download JSON</button>
+        <button type="button" id="btn-backup-export-yaml" class="tunnel-add-btn">Download YAML</button>
+      </div>
+    </section>
+
+    <section class="backup-section">
+      <h4>Import</h4>
+      <p class="backup-hint">
+        Accepts the same JSON or YAML format. Items with an <code>id</code> that already exists are overwritten; new ones are added. Existing items not in the file are kept.
+      </p>
+      <div class="backup-buttons">
+        <button type="button" id="btn-import-backup" class="tunnel-add-btn">Choose file…</button>
+        <span id="backup-import-status" class="backup-status"></span>
+      </div>
+    </section>
+
+    <div class="dialog-actions">
+      <button type="button" id="btn-backup-close">Close</button>
+    </div>
+  </dialog>
+
+  <!-- Bastions manager dialog -->
+  <dialog id="bastions-dialog" class="bastions-dialog">
+    <!-- List view -->
+    <section class="bastions-view" data-view="list">
+      <h3>SSH bastions</h3>
+      <p class="bastions-hint">Reusable SSH hops, referenced from the Hop dropdowns in the connection dialog.</p>
+      <div id="bastions-list-view"></div>
+      <div class="dialog-actions">
+        <button type="button" id="btn-new-bastion" class="tunnel-add-btn">+ New bastion</button>
+        <span class="dialog-spacer"></span>
+        <button type="button" id="btn-bastions-close">Close</button>
+      </div>
+    </section>
+
+    <!-- Detail view (one bastion at a time) -->
+    <section class="bastions-view hidden" data-view="detail">
+      <header class="bastion-detail-header">
+        <button type="button" id="btn-bastion-back" class="bastion-back" title="Back to list">&larr;</button>
+        <h3 id="bastion-detail-title">Edit bastion</h3>
+      </header>
+      <div id="bastion-detail-form"></div>
+      <div class="dialog-actions">
+        <button type="button" id="btn-bastion-delete" class="bastion-delete-btn">Delete</button>
+        <span class="dialog-spacer"></span>
+        <button type="button" id="btn-bastion-cancel">Cancel</button>
+        <button type="button" id="btn-bastion-save">Save</button>
+      </div>
+    </section>
+  </dialog>
+
   <!-- Connection dialog -->
   <dialog id="connection-dialog">
     <form id="connection-form" method="dialog">
@@ -190,6 +259,21 @@
           <option value="verify-full">Verify Full</option>
         </select>
       </label>
+
+      <label class="checkbox-label">
+        <input type="checkbox" id="tunnel-enabled" name="tunnel-enabled">
+        <span>Use SSH tunnel (bastion chain)</span>
+      </label>
+      <fieldset id="tunnel-hops" class="hidden">
+        <legend>SSH hops — psql connects to the DB through this chain, in order</legend>
+        <p class="tunnel-note">Host and port above must be the DB as seen <strong>from the last bastion</strong> (e.g. internal DNS, private IP) — not from your browser.</p>
+        <div id="tunnel-hops-list"></div>
+        <div class="tunnel-hops-actions">
+          <button type="button" id="btn-add-hop" class="tunnel-add-btn">+ Add hop</button>
+          <button type="button" id="btn-manage-bastions" class="tunnel-add-btn">Manage bastions…</button>
+        </div>
+      </fieldset>
+
       <input type="hidden" name="id" value="">
       <div class="dialog-actions">
         <button type="button" id="btn-cancel">Cancel</button>
@@ -198,6 +282,29 @@
     </form>
   </dialog>
 
-  <script src="../dist/renderer.bundle.js"></script>
+  <script src="/static/dist/renderer.bundle.js"></script>
+  <script>
+    // Mobile sidebar drawer: toggle, backdrop, auto-close on connection pick
+    (function () {
+      const body = document.body;
+      const toggle = document.getElementById('sidebar-toggle');
+      const backdrop = document.getElementById('sidebar-backdrop');
+      const connList = document.getElementById('connection-list');
+      const mq = window.matchMedia('(max-width: 640px)');
+      const setOpen = (open) => {
+        body.classList.toggle('sidebar-open', open);
+        toggle.setAttribute('aria-expanded', String(open));
+      };
+      toggle.addEventListener('click', () => setOpen(!body.classList.contains('sidebar-open')));
+      backdrop.addEventListener('click', () => setOpen(false));
+      connList.addEventListener('click', (e) => {
+        if (!mq.matches) return;
+        if (e.target.closest('.conn-item') && !e.target.closest('.conn-item-actions')) {
+          setOpen(false);
+        }
+      });
+      mq.addEventListener('change', (e) => { if (!e.matches) setOpen(false); });
+    })();
+  </script>
 </body>
 </html>

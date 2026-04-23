@@ -2,15 +2,11 @@
   "name": "aperium-psql",
   "productName": "Aperium PSQL",
   "version": "0.1.0",
-  "description": "A clean PostgreSQL UI with real psql terminal",
-  "main": "main.js",
+  "description": "A clean PostgreSQL UI with real psql terminal, served as a web app",
   "scripts": {
     "build": "esbuild src/renderer.js --bundle --outfile=dist/renderer.bundle.js --platform=browser --format=iife --target=chrome120",
-    "start": "npm run build && electron .",
-    "package": "npm run build && npx @electron/packager . 'Aperium PSQL' --platform=darwin --arch=arm64 --icon=assets/icon.icns --overwrite --prune=true --asar.unpackDir=node_modules/node-pty --ignore='(src/|assets/icon.iconset|assets/icon_rounded|assets/icon_macos|\\.iconset)'",
-    "package:linux": "npm run build && npx @electron/packager . 'aperium-psql' --platform=linux --arch=x64 --icon=assets/icon.png --overwrite --prune=true --asar.unpackDir=node_modules/node-pty --ignore='(src/|assets/icon.iconset|assets/icon_rounded|assets/icon_macos|\\.iconset)'",
-    "package:linux-arm64": "npm run build && npx @electron/packager . 'aperium-psql' --platform=linux --arch=arm64 --icon=assets/icon.png --overwrite --prune=true --asar.unpackDir=node_modules/node-pty --ignore='(src/|assets/icon.iconset|assets/icon_rounded|assets/icon_macos|\\.iconset)'",
-    "rebuild": "electron-rebuild"
+    "start": "npm run build && node server/index.js",
+    "serve": "node server/index.js"
   },
   "dependencies": {
     "@codemirror/autocomplete": "^6.20.1",
@@ -25,12 +21,10 @@
     "@xterm/xterm": "^5.5.0",
     "codemirror": "^6.0.2",
     "esbuild": "^0.28.0",
-    "node-pty": "^1.0.0"
-  },
-  "devDependencies": {
-    "@electron/packager": "^19.1.0",
-    "@electron/rebuild": "^4.0.3",
-    "electron": "^33.0.0",
-    "electron-rebuild": "^3.2.9"
+    "express": "^4.21.0",
+    "js-yaml": "^4.1.0",
+    "node-pty": "^1.0.0",
+    "ssh2": "^1.15.0",
+    "ws": "^8.18.0"
   }
 }

@@ -1,0 +1,64 @@
+services:
+  aperium:
+    build: .
+    image: aperium-psql:latest
+    container_name: aperium-psql
+    ports:
+      - "8088:8080"
+    volumes:
+      - ./data:/data
+      # SSH private keys referenced by bastions by path (e.g. /keys/my-key).
+      # Mount whatever key dir you need; read-only is recommended.
+      - ./keys:/keys:ro
+    environment:
+      - APERIUM_DATA_DIR=/data
+      - PORT=8080
+      - TZ=${TZ:-UTC}
+    networks:
+      - public
+    depends_on:
+      - postgres
+      - bastion
+    restart: unless-stopped
+
+  bastion:
+    image: lscr.io/linuxserver/openssh-server:latest
+    container_name: aperium-bastion
+    ports:
+      - "2222:2222"
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=${TZ:-UTC}
+      - USER_NAME=jump
+      - PASSWORD_ACCESS=false
+      - PUBLIC_KEY_FILE=/keys/bastion_key.pub
+    volumes:
+      - ./scripts/bastion_key.pub:/keys/bastion_key.pub:ro
+      - ./scripts/bastion-init:/custom-cont-init.d:ro
+    networks:
+      - public
+      - internal
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16
+    container_name: aperium-postgres
+    # No `ports:` — postgres is only reachable from the `internal` network (i.e.
+    # via the bastion). Swap to `"5433:5432"` on `public` if you want to connect
+    # directly from the host.
+    environment:
+      - POSTGRES_USER=aperium
+      - POSTGRES_PASSWORD=aperium
+      - POSTGRES_DB=aperium
+    volumes:
+      - ./data/pg:/var/lib/postgresql/data
+      - ./scripts/init-postgres.sql:/docker-entrypoint-initdb.d/01-seed.sql:ro
+    networks:
+      - internal
+    restart: unless-stopped
+
+networks:
+  public:
+  internal:
+    internal: true
