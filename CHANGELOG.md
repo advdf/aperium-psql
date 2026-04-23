@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased — CI: publish Docker image to GHCR
+
+- New GitHub Actions workflow `.github/workflows/docker-publish.yml`
+  builds and pushes the Docker image to the GitHub Container Registry
+  (`ghcr.io/advdf/aperium-psql`) on every push to `main`, plus a manual
+  `workflow_dispatch` trigger. Tags: `latest` on the default branch and
+  `sha-<shortsha>` for per-commit pinning. Uses `docker/build-push-action`
+  with GitHub Actions cache (`cache-from: type=gha`) to keep rebuilds fast.
+  Auth via the built-in `GITHUB_TOKEN` — no external secrets required.
+
 ## Unreleased — Key paths + backups
 
 Follow-up to the SSH-tunnel work: SSH private keys are no longer stored

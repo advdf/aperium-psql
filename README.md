@@ -83,6 +83,22 @@ Then open <http://localhost:8080> in **Firefox** or **Chrome**.
 
 `docker compose down` to stop. Data (saved connections, snippets, debug log) lives in `./data` on the host.
 
+### Prebuilt image (GHCR)
+
+Every push to `main` publishes the image to the GitHub Container Registry:
+
+```bash
+docker pull ghcr.io/advdf/aperium-psql:latest
+```
+
+Tags:
+- `latest` — head of `main`
+- `sha-<shortsha>` — specific commit, useful for pinning
+
+To use the prebuilt image with the provided compose stack, replace the
+`build: .` line under the `aperium` service in `docker-compose.yml` with
+`image: ghcr.io/advdf/aperium-psql:latest` (and drop the `build:` key).
+
 ### Connecting to PostgreSQL on the host
 
 From inside the container, the host is reachable at:
