@@ -104,7 +104,34 @@ export function updateSchema(schema) {
   schemaState = schema;
 }
 
-export function createEditor(parent, { onRun, onSendTerminal, onHistoryPrev, onHistoryNext }) {
+function backslashCompletionSource(metaCommands) {
+  if (!Array.isArray(metaCommands) || metaCommands.length === 0) return null;
+  // De-dup by prefix and pre-build options.
+  const seen = new Set();
+  const options = [];
+  for (const m of metaCommands) {
+    const prefix = m.prefix || m.cmd;
+    if (!prefix || seen.has(prefix + (m.args || ''))) continue;
+    seen.add(prefix + (m.args || ''));
+    options.push({
+      label: prefix,
+      displayLabel: m.cmd + (m.args ? ' ' + m.args : ''),
+      detail: m.category || '',
+      info: m.desc || '',
+      type: 'keyword',
+      apply: prefix,
+      boost: prefix === '\\d' || prefix === '\\dt' || prefix === '\\df' ? 10 : 0,
+    });
+  }
+  return (context) => {
+    const word = context.matchBefore(/\\[a-zA-Z?!+]*/);
+    if (!word) return null;
+    if (word.from === word.to && !context.explicit) return null;
+    return { from: word.from, options, validFor: /^\\[a-zA-Z?!+]*$/ };
+  };
+}
+
+export function createEditor(parent, { onRun, onSendTerminal, onHistoryPrev, onHistoryNext, metaCommands }) {
   const runKeymap = keymap.of([
     {
       key: 'Mod-Enter',
@@ -142,6 +169,10 @@ export function createEditor(parent, { onRun, onSendTerminal, onHistoryPrev, onH
         activateOnTyping: true,
         maxRenderedOptions: 30,
       }),
+      ...(() => {
+        const source = backslashCompletionSource(metaCommands);
+        return source ? [EditorState.languageData.of(() => [{ autocomplete: source }])] : [];
+      })(),
       catppuccinTheme,
       syntaxHighlighting(catppuccinHighlight),
       placeholder('-- Write your SQL here. Cmd+Enter to run, Cmd+Shift+Enter to send to terminal.'),

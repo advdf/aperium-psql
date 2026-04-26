@@ -15,6 +15,9 @@ let activeTabId = null;
 // ---- Connections ----
 let connections = [];
 
+// ---- psql backslash commands (loaded once at init for the editor's autocomplete) ----
+let psqlMeta = [];
+
 // DOM
 const connectionList = document.getElementById('connection-list');
 const welcome = document.getElementById('welcome');
@@ -44,6 +47,11 @@ const btnExportJson = document.getElementById('btn-export-json');
 const btnStop = document.getElementById('btn-stop');
 const connSearch = document.getElementById('conn-search');
 const terminalPanel = document.getElementById('terminal-panel');
+const terminalLabel = document.querySelector('#terminal-panel .terminal-label');
+
+function isShellMode(conn) {
+  return conn && conn.terminalMode === 'shell';
+}
 
 // ---- Sidebar search ----
 connSearch.addEventListener('input', () => {
@@ -57,6 +65,8 @@ connSearch.addEventListener('input', () => {
 // ---- Init ----
 async function init() {
   connections = await window.api.listConnections();
+  await loadBastionsCache();
+  psqlMeta = await window.api.loadPsqlMeta();
   renderConnections();
   setupResizeHandles();
 
@@ -72,7 +82,8 @@ async function init() {
   window.api.onPtyExit(({ id, exitCode }) => {
     for (const [, tab] of tabs) {
       if (tab.ptyId === id && tab.terminal) {
-        tab.terminal.write(`\r\n\x1b[33m[psql exited with code ${exitCode}]\x1b[0m\r\n`);
+        const label = isShellMode(tab.connection) ? 'shell' : 'psql';
+        tab.terminal.write(`\r\n\x1b[33m[${label} exited with code ${exitCode}]\x1b[0m\r\n`);
         updateConnectionStatus(tab.connId, false);
       }
     }
@@ -133,6 +144,7 @@ function editorCallbacks() {
     onSendTerminal: sendToTerminal,
     onHistoryPrev: historyPrev,
     onHistoryNext: historyNext,
+    metaCommands: psqlMeta,
   };
 }
 
@@ -265,13 +277,11 @@ function createConnItem(conn) {
       <button class="conn-new-tab" title="Open in new tab (Cmd+click)">+</button>
       <button class="edit" title="Edit">&#9998;</button>
       <button class="duplicate" title="Duplicate">&#10697;</button>
-      <button class="delete" title="Delete">&times;</button>
     </div>
   `;
   el.addEventListener('click', (e) => {
     if (e.target.closest('.edit')) openEditDialog(conn);
     else if (e.target.closest('.duplicate')) openDuplicateDialog(conn);
-    else if (e.target.closest('.delete')) deleteConnection(conn.id);
     else if (e.target.closest('.conn-new-tab')) openTab(conn, true);
     else openTab(conn, e.metaKey || e.ctrlKey);
   });
@@ -310,7 +320,10 @@ async function openEditDialog(conn) {
   form.elements.database.value = conn.database || 'postgres';
   form.elements.sslmode.value = conn.sslmode || '';
   renderTunnelForm(conn.tunnel);
+  renderShellForm(conn);
   updateGroupSuggestions();
+  setDialogDeleteVisibility(true);
+  hideDialogToast();
   dialog.showModal();
 }
 
@@ -327,7 +340,10 @@ async function openDuplicateDialog(conn) {
   form.elements.database.value = conn.database || 'postgres';
   form.elements.sslmode.value = conn.sslmode || '';
   renderTunnelForm(conn.tunnel);
+  renderShellForm(conn);
   updateGroupSuggestions();
+  setDialogDeleteVisibility(false);
+  hideDialogToast();
   dialog.showModal();
 }
 
@@ -471,7 +487,8 @@ function switchTab(tabId) {
 
   // Update connection info
   const c = tab.connection;
-  connectionInfo.textContent = `${c.user || 'postgres'}@${c.host || 'localhost'}:${c.port || 5432}/${c.database || 'postgres'}`;
+  connectionInfo.textContent = formatConnectionInfo(c);
+  applyTerminalChrome(tab);
 
   // Restore database selector for this tab
   if (tab.databases) {
@@ -599,15 +616,37 @@ async function spawnTabTerminal(tab) {
     });
   }
 
-  // Read-only terminal — only Ctrl+C passes through
-  tab.terminal.onData((data) => {
-    if (data === '\x03') window.api.writePty(tab.ptyId, data);
-  });
+  // Forward all keystrokes to the PTY in both psql and shell mode. The user can
+  // now type queries directly in the terminal in addition to using the editor.
+  tab.terminal.onData((data) => window.api.writePty(tab.ptyId, data));
 
   tab.terminal.onResize(({ cols, rows }) => window.api.resizePty(tab.ptyId, cols, rows));
 
   await window.api.spawnPty(tab.ptyId, tab.connection);
   updateConnectionStatus(tab.connId, true);
+}
+
+function applyTerminalChrome(tab) {
+  const shellMode = tab && isShellMode(tab.connection);
+  if (terminalLabel) terminalLabel.textContent = shellMode ? 'Shell' : 'psql terminal';
+  if (btnSendTerminal) btnSendTerminal.classList.toggle('hidden', !!shellMode);
+}
+
+function formatConnectionInfo(conn) {
+  if (!conn) return '';
+  if (isShellMode(conn)) {
+    const hops = conn.tunnel?.hops || [];
+    const idx = Number.isInteger(conn.shellHopIndex)
+      ? conn.shellHopIndex
+      : Math.max(0, hops.length - 1);
+    const hop = hops[idx];
+    const bastion = hop?.bastionId ? bastionsCache.find((b) => b.id === hop.bastionId) : null;
+    const user = bastion?.user || hop?.user || 'ssh';
+    const host = bastion?.host || hop?.host || '?';
+    const port = bastion?.port || hop?.port || 22;
+    return `${user}@${host}:${port} (hop ${idx + 1}/${hops.length})`;
+  }
+  return `${conn.user || 'postgres'}@${conn.host || 'localhost'}:${conn.port || 5432}/${conn.database || 'postgres'}`;
 }
 
 // ---- Snippets ----
@@ -1878,6 +1917,7 @@ function renderHopElement(hop = {}, idx = 1) {
   el.querySelector('.tunnel-remove-hop').addEventListener('click', () => {
     el.remove();
     renumberHops();
+    syncShellHopOptions();
   });
 
   return el;
@@ -1915,13 +1955,90 @@ tunnelEnabled.addEventListener('change', () => {
   if (tunnelEnabled.checked && tunnelHopsList.children.length === 0) {
     tunnelHopsList.appendChild(renderHopElement({}, 1));
   }
+  syncShellHopOptions();
 });
 
 btnAddHop.addEventListener('click', () => {
   tunnelHopsList.appendChild(renderHopElement({}, tunnelHopsList.children.length + 1));
+  syncShellHopOptions();
 });
 
 btnManageBastions.addEventListener('click', () => openBastionsManager());
+
+// ---- Shell mode form helpers (connection dialog) ----
+const terminalShellEl = document.getElementById('terminal-shell');
+const shellOptionsFieldset = document.getElementById('shell-options');
+const shellHopIndexEl = document.getElementById('shell-hop-index');
+
+function currentHopBastionIds() {
+  if (!tunnelEnabled.checked) return [];
+  return Array.from(tunnelHopsList.querySelectorAll('.tunnel-hop-picker')).map((sel) => sel.value);
+}
+
+function bastionLabel(id) {
+  const b = bastionsCache.find((x) => x.id === id);
+  return b ? bastionSummary(b) : '— pick a bastion —';
+}
+
+function syncShellHopOptions() {
+  const ids = currentHopBastionIds();
+  const previous = shellHopIndexEl.value;
+  shellHopIndexEl.innerHTML = '';
+  if (ids.length === 0) {
+    const opt = document.createElement('option');
+    opt.value = '';
+    opt.textContent = '— add an SSH hop first —';
+    shellHopIndexEl.appendChild(opt);
+    shellHopIndexEl.disabled = true;
+    return;
+  }
+  shellHopIndexEl.disabled = false;
+  ids.forEach((id, i) => {
+    const opt = document.createElement('option');
+    opt.value = String(i);
+    opt.textContent = `Hop ${i + 1} — ${bastionLabel(id)}`;
+    shellHopIndexEl.appendChild(opt);
+  });
+  // Preserve previous selection if still in range, else default to last hop.
+  const prevIdx = Number(previous);
+  if (Number.isInteger(prevIdx) && prevIdx >= 0 && prevIdx < ids.length) {
+    shellHopIndexEl.value = String(prevIdx);
+  } else {
+    shellHopIndexEl.value = String(ids.length - 1);
+  }
+}
+
+function renderShellForm(conn) {
+  const enabled = isShellMode(conn);
+  terminalShellEl.checked = enabled;
+  shellOptionsFieldset.classList.toggle('hidden', !enabled);
+  syncShellHopOptions();
+  // Apply the saved hop index if valid; otherwise default to last hop (already set by sync).
+  if (Number.isInteger(conn?.shellHopIndex)) {
+    const max = shellHopIndexEl.options.length - 1;
+    if (conn.shellHopIndex >= 0 && conn.shellHopIndex <= max) {
+      shellHopIndexEl.value = String(conn.shellHopIndex);
+    }
+  }
+}
+
+function readShellFromForm() {
+  if (!terminalShellEl.checked) return { terminalMode: undefined, shellHopIndex: undefined };
+  const idx = Number.parseInt(shellHopIndexEl.value, 10);
+  return {
+    terminalMode: 'shell',
+    shellHopIndex: Number.isInteger(idx) && idx >= 0 ? idx : null,
+  };
+}
+
+terminalShellEl.addEventListener('change', () => {
+  shellOptionsFieldset.classList.toggle('hidden', !terminalShellEl.checked);
+  if (terminalShellEl.checked) syncShellHopOptions();
+});
+
+// Refresh available hops whenever the chain changes (add/remove hop, picker change, toggle).
+tunnelHopsList.addEventListener('change', () => syncShellHopOptions());
+tunnelEnabled.addEventListener('change', () => syncShellHopOptions());
 
 // ---- Bastions manager dialog (master-detail) ----
 const bastionsDialog = document.getElementById('bastions-dialog');
@@ -2244,11 +2361,154 @@ btnNewConn.addEventListener('click', async () => {
   form.elements.port.value = '5432';
   form.elements.database.value = 'postgres';
   renderTunnelForm(null);
+  renderShellForm(null);
   updateGroupSuggestions();
+  setDialogDeleteVisibility(false);
+  hideDialogToast();
   dialog.showModal();
 });
 
 btnCancel.addEventListener('click', () => dialog.close());
+
+// ---- Generic styled confirm dialog ----
+const confirmDialog = document.getElementById('confirm-dialog');
+const confirmTitle = document.getElementById('confirm-title');
+const confirmMessage = document.getElementById('confirm-message');
+const btnConfirmCancel = document.getElementById('btn-confirm-cancel');
+const btnConfirmOk = document.getElementById('btn-confirm-ok');
+
+function showConfirm({ title, message, okLabel = 'Delete', okVariant = 'danger' }) {
+  return new Promise((resolve) => {
+    confirmTitle.textContent = title;
+    confirmMessage.textContent = message;
+    btnConfirmOk.textContent = okLabel;
+    btnConfirmOk.classList.toggle('confirm-ok-danger', okVariant === 'danger');
+
+    const cleanup = () => {
+      btnConfirmOk.removeEventListener('click', onOk);
+      btnConfirmCancel.removeEventListener('click', onCancel);
+      confirmDialog.removeEventListener('close', onClose);
+      confirmDialog.removeEventListener('cancel', onCancelEvt);
+    };
+    const onOk = () => { cleanup(); confirmDialog.close('ok'); resolve(true); };
+    const onCancel = () => { cleanup(); confirmDialog.close('cancel'); resolve(false); };
+    const onClose = () => { cleanup(); resolve(false); };
+    const onCancelEvt = (e) => { e.preventDefault(); onCancel(); };
+
+    btnConfirmOk.addEventListener('click', onOk);
+    btnConfirmCancel.addEventListener('click', onCancel);
+    confirmDialog.addEventListener('close', onClose, { once: true });
+    confirmDialog.addEventListener('cancel', onCancelEvt);
+
+    confirmDialog.showModal();
+    requestAnimationFrame(() => btnConfirmCancel.focus());
+  });
+}
+
+// ---- Edit-dialog actions: kebab menu (Delete / Test connection) ----
+const connMenuWrap = document.getElementById('conn-menu-wrap');
+const btnConnMenu = document.getElementById('btn-conn-menu');
+const connMenu = document.getElementById('conn-menu');
+const btnDeleteConn = document.getElementById('btn-delete-conn');
+const btnTestConn = document.getElementById('btn-test-conn');
+const dialogToast = document.getElementById('dialog-toast');
+
+function setDialogDeleteVisibility(visible) {
+  // Same gating as before: kebab is shown only on the edit dialog (existing
+  // connection), hidden on New/Duplicate.
+  connMenuWrap.classList.toggle('hidden', !visible);
+  if (!visible) closeConnMenu();
+}
+
+function openConnMenu() {
+  connMenu.classList.remove('hidden');
+  btnConnMenu.setAttribute('aria-expanded', 'true');
+  // Focus first item for keyboard nav.
+  requestAnimationFrame(() => btnTestConn.focus());
+}
+function closeConnMenu() {
+  connMenu.classList.add('hidden');
+  btnConnMenu.setAttribute('aria-expanded', 'false');
+}
+function toggleConnMenu() {
+  if (connMenu.classList.contains('hidden')) openConnMenu();
+  else closeConnMenu();
+}
+
+btnConnMenu.addEventListener('click', (e) => {
+  e.stopPropagation();
+  toggleConnMenu();
+});
+// Close on outside click / Esc.
+document.addEventListener('click', (e) => {
+  if (connMenu.classList.contains('hidden')) return;
+  if (e.target.closest('#conn-menu') || e.target.closest('#btn-conn-menu')) return;
+  closeConnMenu();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !connMenu.classList.contains('hidden')) {
+    e.stopPropagation();
+    closeConnMenu();
+    btnConnMenu.focus();
+  }
+});
+
+function showDialogToast(kind, text) {
+  dialogToast.className = `dialog-toast dialog-toast-${kind}`;
+  dialogToast.innerHTML = (kind === 'loading'
+    ? '<span class="toast-spinner" aria-hidden="true"></span>'
+    : '') + `<span>${escapeHtml(text)}</span>`;
+}
+function hideDialogToast() {
+  dialogToast.className = 'dialog-toast hidden';
+  dialogToast.innerHTML = '';
+}
+
+btnDeleteConn.addEventListener('click', async () => {
+  closeConnMenu();
+  const id = form.elements.id.value;
+  if (!id) return;
+  const conn = connections.find((c) => c.id === id);
+  const name = conn?.name || 'this connection';
+  const confirmed = await showConfirm({
+    title: 'Delete connection?',
+    message: `“${name}” will be removed permanently. This action cannot be undone.`,
+    okLabel: 'Delete',
+    okVariant: 'danger',
+  });
+  if (!confirmed) return;
+  await deleteConnection(id);
+  dialog.close();
+});
+
+btnTestConn.addEventListener('click', async () => {
+  closeConnMenu();
+  // Build a temporary connection object from the current form state — that way
+  // the user can test edits before saving them.
+  const data = Object.fromEntries(new FormData(form));
+  delete data.id; delete data['tunnel-enabled']; delete data['terminal-shell']; delete data['shell-target'];
+  const tunnel = readTunnelFromForm();
+  tunnel.hops = tunnel.hops.filter((h) => h.bastionId || h.host || h.user || h.privateKey);
+  data.tunnel = tunnel;
+  const shellCfg = readShellFromForm();
+  if (shellCfg.terminalMode === 'shell') {
+    data.terminalMode = 'shell';
+    data.shellHopIndex = shellCfg.shellHopIndex;
+  }
+
+  showDialogToast('loading', 'Testing connection…');
+  try {
+    const result = await window.api.testConnection(data);
+    if (result.ok) {
+      showDialogToast('ok', `Connection OK • ${result.message || ''} (${result.duration}ms)`.trim());
+      setTimeout(() => hideDialogToast(), 4500);
+    } else {
+      showDialogToast('error', result.error || 'Connection failed');
+    }
+  } catch (err) {
+    showDialogToast('error', err.message || 'Connection failed');
+  }
+});
 
 form.addEventListener('submit', async (e) => {
   e.preventDefault();
@@ -2256,6 +2516,8 @@ form.addEventListener('submit', async (e) => {
   const editId = data.id;
   delete data.id;
   delete data['tunnel-enabled'];
+  delete data['terminal-shell'];
+  delete data['shell-target'];
   const tunnel = readTunnelFromForm();
   // Drop empty hops: neither a ref nor inline data
   tunnel.hops = tunnel.hops.filter((h) => h.bastionId || h.host || h.user || h.privateKey);
@@ -2265,9 +2527,37 @@ form.addEventListener('submit', async (e) => {
   }
   data.tunnel = tunnel;
 
+  const shellCfg = readShellFromForm();
+  if (shellCfg.terminalMode === 'shell') {
+    if (!tunnel.enabled || tunnel.hops.length === 0) {
+      alert('Shell mode requires an enabled SSH tunnel with at least one bastion.');
+      return;
+    }
+    if (shellCfg.shellHopIndex == null || shellCfg.shellHopIndex < 0 || shellCfg.shellHopIndex >= tunnel.hops.length) {
+      alert('Pick a valid hop on which to open the shell.');
+      return;
+    }
+    data.terminalMode = 'shell';
+    data.shellHopIndex = shellCfg.shellHopIndex;
+  } else {
+    delete data.terminalMode;
+    delete data.shellHopIndex;
+  }
+
   if (editId) {
     const idx = connections.findIndex((c) => c.id === editId);
-    if (idx >= 0) connections[idx] = { ...connections[idx], ...data };
+    if (idx >= 0) {
+      const merged = { ...connections[idx], ...data };
+      // Strip shell-mode fields when not in shell mode (so deletes propagate)
+      if (data.terminalMode !== 'shell') {
+        delete merged.terminalMode;
+        delete merged.shellHopIndex;
+      }
+      // Drop legacy shell fields that are no longer used.
+      delete merged.shellTarget;
+      delete merged.dbHostSsh;
+      connections[idx] = merged;
+    }
   } else {
     data.id = crypto.randomUUID();
     connections.push(data);
@@ -2305,10 +2595,9 @@ async function runQuery() {
 
   addToHistory(getRawEditorContent());
 
-  if (hasMetacommand(query)) {
-    sendToTerminal();
-    return;
-  }
+  // Meta-commands and regular queries both go through /api/query — the server
+  // detects the leading backslash and switches psql args (drops --csv, keeps
+  // aligned output). The result is rendered in the Results panel either way.
 
   resultsContainer.innerHTML = '<div class="results-loading"><div class="spinner"></div>Running...</div>';
   resultsStatus.textContent = '';
@@ -2347,6 +2636,58 @@ async function runQuery() {
     return;
   }
 
+  if (result.isMetacommand) {
+    tab.lastResults = null;
+    hideCopyButtons();
+    resultsContainer.innerHTML = '';
+    const raw = result.raw || '';
+    const blocks = parsePsqlAligned(raw);
+
+    let totalRows = 0;
+    let tableCount = 0;
+    for (const blk of blocks) {
+      if (blk.kind === 'title') {
+        const el = document.createElement('div');
+        el.className = 'results-meta-title';
+        el.textContent = blk.text;
+        resultsContainer.appendChild(el);
+      } else if (blk.kind === 'table') {
+        resultsContainer.appendChild(buildTableEl(blk.columns, blk.rows));
+        totalRows += blk.rows.length;
+        tableCount++;
+      } else if (blk.kind === 'text' && blk.text.trim()) {
+        const el = document.createElement('pre');
+        el.className = 'results-meta';
+        el.textContent = blk.text;
+        resultsContainer.appendChild(el);
+      }
+    }
+    if (result.stderr) {
+      const el = document.createElement('pre');
+      el.className = 'results-meta-stderr';
+      el.textContent = result.stderr;
+      resultsContainer.appendChild(el);
+    }
+    if (resultsContainer.childElementCount === 0) {
+      resultsContainer.innerHTML =
+        `<div class="results-message">Meta-command produced no output.</div>`;
+    }
+
+    // Enable Copy/Export when the meta-cmd produced exactly one table and nothing else
+    // (e.g. \dt, \dn). For multi-block output (\d users) we leave them off.
+    if (tableCount === 1 && blocks.every((b) => b.kind !== 'text')) {
+      const tableBlock = blocks.find((b) => b.kind === 'table');
+      tab.lastResults = { columns: tableBlock.columns, rows: tableBlock.rows };
+      showCopyButtons();
+    }
+
+    resultsStatus.textContent = tableCount
+      ? `${totalRows} row${totalRows !== 1 ? 's' : ''} • meta-command (${result.duration}ms)`
+      : `meta-command (${result.duration}ms)`;
+    resultsStatus.className = 'success';
+    return;
+  }
+
   if (result.message) {
     tab.lastResults = null;
     hideCopyButtons();
@@ -2379,7 +2720,7 @@ function hideCopyButtons() {
   btnExportJson.classList.add('hidden');
 }
 
-function renderTable(columns, rows) {
+function buildTableEl(columns, rows) {
   const table = document.createElement('table');
   const thead = document.createElement('thead');
   const headerRow = document.createElement('tr');
@@ -2408,9 +2749,99 @@ function renderTable(columns, rows) {
     tbody.appendChild(tr);
   });
   table.appendChild(tbody);
+  return table;
+}
 
+function renderTable(columns, rows) {
   resultsContainer.innerHTML = '';
-  resultsContainer.appendChild(table);
+  resultsContainer.appendChild(buildTableEl(columns, rows));
+}
+
+// Parse psql's aligned output (the default format used for meta-commands like
+// \dt, \d users, \df) into a sequence of blocks. Each block is either a table
+// (with columns + rows), a title line, or free-form text. \d users for example
+// returns: [title, table, text(indexes…), text(foreign keys…)].
+function parsePsqlAligned(raw) {
+  const lines = raw.replace(/\r\n/g, '\n').split('\n');
+  const blocks = [];
+  let i = 0;
+
+  const isSeparator = (s) =>
+    /^[-+]+$/.test(s.replace(/ /g, '')) && s.includes('+') && s.includes('-');
+
+  while (i < lines.length) {
+    // Find the next separator line (column-divider made of dashes + plusses).
+    let sep = -1;
+    for (let j = i; j < lines.length; j++) {
+      if (isSeparator(lines[j])) { sep = j; break; }
+    }
+    if (sep < 0) {
+      const tail = lines.slice(i).join('\n');
+      if (tail.trim()) blocks.push({ kind: 'text', text: tail });
+      break;
+    }
+
+    // Header line is the immediately preceding non-empty line (must contain `|`).
+    let headerIdx = sep - 1;
+    while (headerIdx >= i && lines[headerIdx].trim() === '') headerIdx--;
+    if (headerIdx < i || !lines[headerIdx].includes('|')) {
+      blocks.push({ kind: 'text', text: lines.slice(i, sep + 1).join('\n') });
+      i = sep + 1;
+      continue;
+    }
+
+    // Title = consecutive non-`|` non-empty lines above the header (e.g. "List of relations").
+    let titleStart = headerIdx - 1;
+    while (titleStart >= i && lines[titleStart].trim() && !lines[titleStart].includes('|')) {
+      titleStart--;
+    }
+    titleStart++;
+    // Anything before the title goes out as free text.
+    if (titleStart > i) {
+      const pre = lines.slice(i, titleStart).join('\n');
+      if (pre.trim()) blocks.push({ kind: 'text', text: pre });
+    }
+    if (titleStart < headerIdx) {
+      const title = lines.slice(titleStart, headerIdx)
+        .map((l) => l.trim()).filter(Boolean).join(' ');
+      if (title) blocks.push({ kind: 'title', text: title });
+    }
+
+    // Slice columns by the separator's `+` positions.
+    const sepLine = lines[sep];
+    const boundaries = [];
+    for (let k = 0; k < sepLine.length; k++) if (sepLine[k] === '+') boundaries.push(k);
+
+    const sliceByBoundaries = (line) => {
+      const out = [];
+      let prev = 0;
+      for (const b of boundaries) {
+        out.push((line.slice(prev, b) || '').trim());
+        prev = b + 1;
+      }
+      out.push((line.slice(prev) || '').trim());
+      return out;
+    };
+
+    const columns = sliceByBoundaries(lines[headerIdx]);
+
+    // Data rows until a blank line or "(N rows)" footer or a line without `|`.
+    const rows = [];
+    let r = sep + 1;
+    while (r < lines.length) {
+      const ln = lines[r];
+      if (!ln.trim()) { r++; break; }
+      if (/^\(\d+ rows?\)\s*$/.test(ln.trim())) { r++; break; }
+      if (!ln.includes('|')) break;
+      rows.push(sliceByBoundaries(ln));
+      r++;
+    }
+
+    blocks.push({ kind: 'table', columns, rows });
+    i = r;
+  }
+
+  return blocks;
 }
 
 // ---- Copy results ----
@@ -2509,6 +2940,7 @@ btnExportJson.addEventListener('click', async () => {
 function sendToTerminal() {
   const tab = getActiveTab();
   if (!tab?.terminal) return;
+  if (isShellMode(tab.connection)) return; // No psql to feed in shell mode.
   const query = getEditorContent();
   if (!query) return;
   addToHistory(getRawEditorContent());
@@ -2624,7 +3056,7 @@ dbSelector.addEventListener('change', async () => {
 
   window.api.killPty(tab.ptyId);
   await window.api.spawnPty(tab.ptyId, tab.connection);
-  connectionInfo.textContent = `${tab.connection.user || 'postgres'}@${tab.connection.host || 'localhost'}:${tab.connection.port || 5432}/${newDb}`;
+  connectionInfo.textContent = formatConnectionInfo(tab.connection);
 
   if (tab.terminal) {
     tab.terminal.clear();
@@ -2659,10 +3091,7 @@ async function fetchSchemaForTab(tab) {
         tab.editorView.destroy();
         if (activeTabId === tab.id) {
           editorContainer.innerHTML = '';
-          tab.editorView = createEditor(editorContainer, {
-            onRun: runQuery,
-            onSendTerminal: sendToTerminal,
-          });
+          tab.editorView = createEditor(editorContainer, editorCallbacks());
         } else {
           const tmp = document.createElement('div');
           tab.editorView = createEditor(tmp, editorCallbacks());

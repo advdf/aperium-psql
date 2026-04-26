@@ -1,0 +1,842 @@
+[
+  {
+    "cmd": "\\copyright",
+    "args": "",
+    "desc": "show PostgreSQL usage and distribution terms",
+    "category": "General",
+    "prefix": "\\copyright"
+  },
+  {
+    "cmd": "\\crosstabview",
+    "args": "[COLUMNS]",
+    "desc": "execute query and display result in crosstab",
+    "category": "General",
+    "prefix": "\\crosstabview"
+  },
+  {
+    "cmd": "\\errverbose",
+    "args": "",
+    "desc": "show most recent error message at maximum verbosity",
+    "category": "General",
+    "prefix": "\\errverbose"
+  },
+  {
+    "cmd": "\\g",
+    "args": "[(OPTIONS)] [FILE]",
+    "desc": "execute query (and send result to file or |pipe);",
+    "category": "General",
+    "prefix": "\\g"
+  },
+  {
+    "cmd": "\\gdesc",
+    "args": "",
+    "desc": "describe result of query, without executing it",
+    "category": "General",
+    "prefix": "\\gdesc"
+  },
+  {
+    "cmd": "\\gexec",
+    "args": "",
+    "desc": "execute query, then execute each value in its result",
+    "category": "General",
+    "prefix": "\\gexec"
+  },
+  {
+    "cmd": "\\gset",
+    "args": "[PREFIX]",
+    "desc": "execute query and store result in psql variables",
+    "category": "General",
+    "prefix": "\\gset"
+  },
+  {
+    "cmd": "\\gx",
+    "args": "[(OPTIONS)] [FILE]",
+    "desc": "as \\g, but forces expanded output mode",
+    "category": "General",
+    "prefix": "\\gx"
+  },
+  {
+    "cmd": "\\q",
+    "args": "",
+    "desc": "quit psql",
+    "category": "General",
+    "prefix": "\\q"
+  },
+  {
+    "cmd": "\\restrict",
+    "args": "RESTRICT_KEY",
+    "desc": "enter restricted mode with provided key",
+    "category": "General",
+    "prefix": "\\restrict"
+  },
+  {
+    "cmd": "\\unrestrict",
+    "args": "RESTRICT_KEY",
+    "desc": "exit restricted mode if key matches",
+    "category": "General",
+    "prefix": "\\unrestrict"
+  },
+  {
+    "cmd": "\\watch",
+    "args": "[[i=]SEC] [c=N] [m=MIN]",
+    "desc": "execute query every SEC seconds, up to N times, stop if less than MIN rows are returned",
+    "category": "General",
+    "prefix": "\\watch"
+  },
+  {
+    "cmd": "\\?",
+    "args": "[commands]",
+    "desc": "show help on backslash commands",
+    "category": "Help",
+    "prefix": "\\?"
+  },
+  {
+    "cmd": "\\?",
+    "args": "options",
+    "desc": "show help on psql command-line options",
+    "category": "Help",
+    "prefix": "\\?"
+  },
+  {
+    "cmd": "\\?",
+    "args": "variables",
+    "desc": "show help on special variables",
+    "category": "Help",
+    "prefix": "\\?"
+  },
+  {
+    "cmd": "\\h",
+    "args": "[NAME]",
+    "desc": "help on syntax of SQL commands, * for all commands",
+    "category": "Help",
+    "prefix": "\\h"
+  },
+  {
+    "cmd": "\\e",
+    "args": "[FILE] [LINE]",
+    "desc": "edit the query buffer (or file) with external editor",
+    "category": "Query Buffer",
+    "prefix": "\\e"
+  },
+  {
+    "cmd": "\\ef",
+    "args": "[FUNCNAME [LINE]]",
+    "desc": "edit function definition with external editor",
+    "category": "Query Buffer",
+    "prefix": "\\ef"
+  },
+  {
+    "cmd": "\\ev",
+    "args": "[VIEWNAME [LINE]]",
+    "desc": "edit view definition with external editor",
+    "category": "Query Buffer",
+    "prefix": "\\ev"
+  },
+  {
+    "cmd": "\\p",
+    "args": "",
+    "desc": "show the contents of the query buffer",
+    "category": "Query Buffer",
+    "prefix": "\\p"
+  },
+  {
+    "cmd": "\\r",
+    "args": "",
+    "desc": "reset (clear) the query buffer",
+    "category": "Query Buffer",
+    "prefix": "\\r"
+  },
+  {
+    "cmd": "\\s",
+    "args": "[FILE]",
+    "desc": "display history or save it to file",
+    "category": "Query Buffer",
+    "prefix": "\\s"
+  },
+  {
+    "cmd": "\\w",
+    "args": "FILE",
+    "desc": "write query buffer to file",
+    "category": "Query Buffer",
+    "prefix": "\\w"
+  },
+  {
+    "cmd": "\\copy",
+    "args": "...",
+    "desc": "perform SQL COPY with data stream to the client host",
+    "category": "Input/Output",
+    "prefix": "\\copy"
+  },
+  {
+    "cmd": "\\echo",
+    "args": "[-n] [STRING]",
+    "desc": "write string to standard output (-n for no newline)",
+    "category": "Input/Output",
+    "prefix": "\\echo"
+  },
+  {
+    "cmd": "\\i",
+    "args": "FILE",
+    "desc": "execute commands from file",
+    "category": "Input/Output",
+    "prefix": "\\i"
+  },
+  {
+    "cmd": "\\ir",
+    "args": "FILE",
+    "desc": "as \\i, but relative to location of current script",
+    "category": "Input/Output",
+    "prefix": "\\ir"
+  },
+  {
+    "cmd": "\\o",
+    "args": "[FILE]",
+    "desc": "send all query results to file or |pipe",
+    "category": "Input/Output",
+    "prefix": "\\o"
+  },
+  {
+    "cmd": "\\qecho",
+    "args": "[-n] [STRING]",
+    "desc": "write string to \\o output stream (-n for no newline)",
+    "category": "Input/Output",
+    "prefix": "\\qecho"
+  },
+  {
+    "cmd": "\\warn",
+    "args": "[-n] [STRING]",
+    "desc": "write string to standard error (-n for no newline)",
+    "category": "Input/Output",
+    "prefix": "\\warn"
+  },
+  {
+    "cmd": "\\if",
+    "args": "EXPR",
+    "desc": "begin conditional block",
+    "category": "Conditional",
+    "prefix": "\\if"
+  },
+  {
+    "cmd": "\\elif",
+    "args": "EXPR",
+    "desc": "alternative within current conditional block",
+    "category": "Conditional",
+    "prefix": "\\elif"
+  },
+  {
+    "cmd": "\\else",
+    "args": "",
+    "desc": "final alternative within current conditional block",
+    "category": "Conditional",
+    "prefix": "\\else"
+  },
+  {
+    "cmd": "\\endif",
+    "args": "",
+    "desc": "end conditional block",
+    "category": "Conditional",
+    "prefix": "\\endif"
+  },
+  {
+    "cmd": "\\d[Sx+]",
+    "args": "",
+    "desc": "list tables, views, and sequences",
+    "category": "Informational",
+    "prefix": "\\d"
+  },
+  {
+    "cmd": "\\d[S+]",
+    "args": "NAME",
+    "desc": "describe table, view, sequence, or index",
+    "category": "Informational",
+    "prefix": "\\d"
+  },
+  {
+    "cmd": "\\da[Sx]",
+    "args": "[PATTERN]",
+    "desc": "list aggregates",
+    "category": "Informational",
+    "prefix": "\\da"
+  },
+  {
+    "cmd": "\\dA[x+]",
+    "args": "[PATTERN]",
+    "desc": "list access methods",
+    "category": "Informational",
+    "prefix": "\\dA"
+  },
+  {
+    "cmd": "\\dAc[x+]",
+    "args": "[AMPTRN [TYPEPTRN]]",
+    "desc": "list operator classes",
+    "category": "Informational",
+    "prefix": "\\dAc"
+  },
+  {
+    "cmd": "\\dAf[x+]",
+    "args": "[AMPTRN [TYPEPTRN]]",
+    "desc": "list operator families",
+    "category": "Informational",
+    "prefix": "\\dAf"
+  },
+  {
+    "cmd": "\\dAo[x+]",
+    "args": "[AMPTRN [OPFPTRN]]",
+    "desc": "list operators of operator families",
+    "category": "Informational",
+    "prefix": "\\dAo"
+  },
+  {
+    "cmd": "\\dAp[x+]",
+    "args": "[AMPTRN [OPFPTRN]]",
+    "desc": "list support functions of operator families",
+    "category": "Informational",
+    "prefix": "\\dAp"
+  },
+  {
+    "cmd": "\\db[x+]",
+    "args": "[PATTERN]",
+    "desc": "list tablespaces",
+    "category": "Informational",
+    "prefix": "\\db"
+  },
+  {
+    "cmd": "\\dc[Sx+]",
+    "args": "[PATTERN]",
+    "desc": "list conversions",
+    "category": "Informational",
+    "prefix": "\\dc"
+  },
+  {
+    "cmd": "\\dconfig[x+]",
+    "args": "[PATTERN]",
+    "desc": "list configuration parameters",
+    "category": "Informational",
+    "prefix": "\\dconfig"
+  },
+  {
+    "cmd": "\\dC[x+]",
+    "args": "[PATTERN]",
+    "desc": "list casts",
+    "category": "Informational",
+    "prefix": "\\dC"
+  },
+  {
+    "cmd": "\\dd[Sx]",
+    "args": "[PATTERN]",
+    "desc": "show object descriptions not displayed elsewhere",
+    "category": "Informational",
+    "prefix": "\\dd"
+  },
+  {
+    "cmd": "\\dD[Sx+]",
+    "args": "[PATTERN]",
+    "desc": "list domains",
+    "category": "Informational",
+    "prefix": "\\dD"
+  },
+  {
+    "cmd": "\\ddp[x]",
+    "args": "[PATTERN]",
+    "desc": "list default privileges",
+    "category": "Informational",
+    "prefix": "\\ddp"
+  },
+  {
+    "cmd": "\\dE[Sx+]",
+    "args": "[PATTERN]",
+    "desc": "list foreign tables",
+    "category": "Informational",
+    "prefix": "\\dE"
+  },
+  {
+    "cmd": "\\des[x+]",
+    "args": "[PATTERN]",
+    "desc": "list foreign servers",
+    "category": "Informational",
+    "prefix": "\\des"
+  },
+  {
+    "cmd": "\\det[x+]",
+    "args": "[PATTERN]",
+    "desc": "list foreign tables",
+    "category": "Informational",
+    "prefix": "\\det"
+  },
+  {
+    "cmd": "\\deu[x+]",
+    "args": "[PATTERN]",
+    "desc": "list user mappings",
+    "category": "Informational",
+    "prefix": "\\deu"
+  },
+  {
+    "cmd": "\\dew[x+]",
+    "args": "[PATTERN]",
+    "desc": "list foreign-data wrappers",
+    "category": "Informational",
+    "prefix": "\\dew"
+  },
+  {
+    "cmd": "\\df[anptw][Sx+]",
+    "args": "[FUNCPTRN [TYPEPTRN ...]]",
+    "desc": "list [only agg/normal/procedure/trigger/window] functions",
+    "category": "Informational",
+    "prefix": "\\df[anptw][Sx+]"
+  },
+  {
+    "cmd": "\\dF[x+]",
+    "args": "[PATTERN]",
+    "desc": "list text search configurations",
+    "category": "Informational",
+    "prefix": "\\dF"
+  },
+  {
+    "cmd": "\\dFd[x+]",
+    "args": "[PATTERN]",
+    "desc": "list text search dictionaries",
+    "category": "Informational",
+    "prefix": "\\dFd"
+  },
+  {
+    "cmd": "\\dFp[x+]",
+    "args": "[PATTERN]",
+    "desc": "list text search parsers",
+    "category": "Informational",
+    "prefix": "\\dFp"
+  },
+  {
+    "cmd": "\\dFt[x+]",
+    "args": "[PATTERN]",
+    "desc": "list text search templates",
+    "category": "Informational",
+    "prefix": "\\dFt"
+  },
+  {
+    "cmd": "\\dg[Sx+]",
+    "args": "[PATTERN]",
+    "desc": "list roles",
+    "category": "Informational",
+    "prefix": "\\dg"
+  },
+  {
+    "cmd": "\\di[Sx+]",
+    "args": "[PATTERN]",
+    "desc": "list indexes",
+    "category": "Informational",
+    "prefix": "\\di"
+  },
+  {
+    "cmd": "\\dl[x+]",
+    "args": "",
+    "desc": "list large objects, same as \\lo_list",
+    "category": "Informational",
+    "prefix": "\\dl"
+  },
+  {
+    "cmd": "\\dL[Sx+]",
+    "args": "[PATTERN]",
+    "desc": "list procedural languages",
+    "category": "Informational",
+    "prefix": "\\dL"
+  },
+  {
+    "cmd": "\\dm[Sx+]",
+    "args": "[PATTERN]",
+    "desc": "list materialized views",
+    "category": "Informational",
+    "prefix": "\\dm"
+  },
+  {
+    "cmd": "\\dn[Sx+]",
+    "args": "[PATTERN]",
+    "desc": "list schemas",
+    "category": "Informational",
+    "prefix": "\\dn"
+  },
+  {
+    "cmd": "\\do[Sx+]",
+    "args": "[OPPTRN [TYPEPTRN [TYPEPTRN]]]",
+    "desc": "list operators",
+    "category": "Informational",
+    "prefix": "\\do"
+  },
+  {
+    "cmd": "\\dO[Sx+]",
+    "args": "[PATTERN]",
+    "desc": "list collations",
+    "category": "Informational",
+    "prefix": "\\dO"
+  },
+  {
+    "cmd": "\\dp[Sx]",
+    "args": "[PATTERN]",
+    "desc": "list table, view, and sequence access privileges",
+    "category": "Informational",
+    "prefix": "\\dp"
+  },
+  {
+    "cmd": "\\dP[itnx+]",
+    "args": "[PATTERN]",
+    "desc": "list [only index/table] partitioned relations [n=nested]",
+    "category": "Informational",
+    "prefix": "\\dP"
+  },
+  {
+    "cmd": "\\drds[x]",
+    "args": "[ROLEPTRN [DBPTRN]]",
+    "desc": "list per-database role settings",
+    "category": "Informational",
+    "prefix": "\\drds"
+  },
+  {
+    "cmd": "\\drg[Sx]",
+    "args": "[PATTERN]",
+    "desc": "list role grants",
+    "category": "Informational",
+    "prefix": "\\drg"
+  },
+  {
+    "cmd": "\\dRp[x+]",
+    "args": "[PATTERN]",
+    "desc": "list replication publications",
+    "category": "Informational",
+    "prefix": "\\dRp"
+  },
+  {
+    "cmd": "\\dRs[x+]",
+    "args": "[PATTERN]",
+    "desc": "list replication subscriptions",
+    "category": "Informational",
+    "prefix": "\\dRs"
+  },
+  {
+    "cmd": "\\ds[Sx+]",
+    "args": "[PATTERN]",
+    "desc": "list sequences",
+    "category": "Informational",
+    "prefix": "\\ds"
+  },
+  {
+    "cmd": "\\dt[Sx+]",
+    "args": "[PATTERN]",
+    "desc": "list tables",
+    "category": "Informational",
+    "prefix": "\\dt"
+  },
+  {
+    "cmd": "\\dT[Sx+]",
+    "args": "[PATTERN]",
+    "desc": "list data types",
+    "category": "Informational",
+    "prefix": "\\dT"
+  },
+  {
+    "cmd": "\\du[Sx+]",
+    "args": "[PATTERN]",
+    "desc": "list roles",
+    "category": "Informational",
+    "prefix": "\\du"
+  },
+  {
+    "cmd": "\\dv[Sx+]",
+    "args": "[PATTERN]",
+    "desc": "list views",
+    "category": "Informational",
+    "prefix": "\\dv"
+  },
+  {
+    "cmd": "\\dx[x+]",
+    "args": "[PATTERN]",
+    "desc": "list extensions",
+    "category": "Informational",
+    "prefix": "\\dx"
+  },
+  {
+    "cmd": "\\dX[x]",
+    "args": "[PATTERN]",
+    "desc": "list extended statistics",
+    "category": "Informational",
+    "prefix": "\\dX"
+  },
+  {
+    "cmd": "\\dy[x+]",
+    "args": "[PATTERN]",
+    "desc": "list event triggers",
+    "category": "Informational",
+    "prefix": "\\dy"
+  },
+  {
+    "cmd": "\\l[x+]",
+    "args": "[PATTERN]",
+    "desc": "list databases",
+    "category": "Informational",
+    "prefix": "\\l"
+  },
+  {
+    "cmd": "\\sf[+]",
+    "args": "FUNCNAME",
+    "desc": "show a function's definition",
+    "category": "Informational",
+    "prefix": "\\sf"
+  },
+  {
+    "cmd": "\\sv[+]",
+    "args": "VIEWNAME",
+    "desc": "show a view's definition",
+    "category": "Informational",
+    "prefix": "\\sv"
+  },
+  {
+    "cmd": "\\z[Sx]",
+    "args": "[PATTERN]",
+    "desc": "same as \\dp",
+    "category": "Informational",
+    "prefix": "\\z"
+  },
+  {
+    "cmd": "\\lo_export",
+    "args": "LOBOID FILE",
+    "desc": "write large object to file",
+    "category": "Large Objects",
+    "prefix": "\\lo_export"
+  },
+  {
+    "cmd": "\\lo_import",
+    "args": "FILE [COMMENT]",
+    "desc": "read large object from file",
+    "category": "Large Objects",
+    "prefix": "\\lo_import"
+  },
+  {
+    "cmd": "\\lo_list[x+]",
+    "args": "",
+    "desc": "list large objects",
+    "category": "Large Objects",
+    "prefix": "\\lo_list[x+]"
+  },
+  {
+    "cmd": "\\lo_unlink",
+    "args": "LOBOID",
+    "desc": "delete a large object",
+    "category": "Large Objects",
+    "prefix": "\\lo_unlink"
+  },
+  {
+    "cmd": "\\a",
+    "args": "",
+    "desc": "toggle between unaligned and aligned output mode",
+    "category": "Formatting",
+    "prefix": "\\a"
+  },
+  {
+    "cmd": "\\C",
+    "args": "[STRING]",
+    "desc": "set table title, or unset if none",
+    "category": "Formatting",
+    "prefix": "\\C"
+  },
+  {
+    "cmd": "\\f",
+    "args": "[STRING]",
+    "desc": "show or set field separator for unaligned query output",
+    "category": "Formatting",
+    "prefix": "\\f"
+  },
+  {
+    "cmd": "\\H",
+    "args": "",
+    "desc": "toggle HTML output mode (currently off)",
+    "category": "Formatting",
+    "prefix": "\\H"
+  },
+  {
+    "cmd": "\\pset",
+    "args": "[NAME [VALUE]]",
+    "desc": "set table output option (border|columns|csv_fieldsep|expanded|fieldsep| fieldsep_zero|footer|format|linestyle|null| numericlocale|pager|pager_min_lines|recordsep| recordsep_zero|tableattr|title|tuples_only| unicode_border_linestyle|unicode_column_linestyle| unicode_header_linestyle|xheader_width)",
+    "category": "Formatting",
+    "prefix": "\\pset"
+  },
+  {
+    "cmd": "\\t",
+    "args": "[on|off]",
+    "desc": "show only rows (currently off)",
+    "category": "Formatting",
+    "prefix": "\\t"
+  },
+  {
+    "cmd": "\\T",
+    "args": "[STRING]",
+    "desc": "set HTML <table> tag attributes, or unset if none",
+    "category": "Formatting",
+    "prefix": "\\T"
+  },
+  {
+    "cmd": "\\x",
+    "args": "[on|off|auto]",
+    "desc": "toggle expanded output (currently off)",
+    "category": "Formatting",
+    "prefix": "\\x"
+  },
+  {
+    "cmd": "\\c[onnect]",
+    "args": "{[DBNAME|- USER|- HOST|- PORT|-]",
+    "desc": "| conninfo} connect to new database (currently \"postgres\")",
+    "category": "Connection",
+    "prefix": "\\c"
+  },
+  {
+    "cmd": "\\conninfo",
+    "args": "",
+    "desc": "display information about current connection",
+    "category": "Connection",
+    "prefix": "\\conninfo"
+  },
+  {
+    "cmd": "\\encoding",
+    "args": "[ENCODING]",
+    "desc": "show or set client encoding",
+    "category": "Connection",
+    "prefix": "\\encoding"
+  },
+  {
+    "cmd": "\\password",
+    "args": "[USERNAME]",
+    "desc": "securely change the password for a user",
+    "category": "Connection",
+    "prefix": "\\password"
+  },
+  {
+    "cmd": "\\cd",
+    "args": "[DIR]",
+    "desc": "change the current working directory",
+    "category": "Operating System",
+    "prefix": "\\cd"
+  },
+  {
+    "cmd": "\\getenv",
+    "args": "PSQLVAR ENVVAR",
+    "desc": "fetch environment variable",
+    "category": "Operating System",
+    "prefix": "\\getenv"
+  },
+  {
+    "cmd": "\\setenv",
+    "args": "NAME [VALUE]",
+    "desc": "set or unset environment variable",
+    "category": "Operating System",
+    "prefix": "\\setenv"
+  },
+  {
+    "cmd": "\\timing",
+    "args": "[on|off]",
+    "desc": "toggle timing of commands (currently off)",
+    "category": "Operating System",
+    "prefix": "\\timing"
+  },
+  {
+    "cmd": "\\!",
+    "args": "[COMMAND]",
+    "desc": "execute command in shell or start interactive shell",
+    "category": "Operating System",
+    "prefix": "\\!"
+  },
+  {
+    "cmd": "\\prompt",
+    "args": "[TEXT] NAME",
+    "desc": "prompt user to set internal variable",
+    "category": "Variables",
+    "prefix": "\\prompt"
+  },
+  {
+    "cmd": "\\set",
+    "args": "[NAME [VALUE]]",
+    "desc": "set internal variable, or list all if no parameters",
+    "category": "Variables",
+    "prefix": "\\set"
+  },
+  {
+    "cmd": "\\unset",
+    "args": "NAME",
+    "desc": "unset (delete) internal variable",
+    "category": "Variables",
+    "prefix": "\\unset"
+  },
+  {
+    "cmd": "\\bind",
+    "args": "[PARAM]...",
+    "desc": "set query parameters",
+    "category": "Extended Query Protocol",
+    "prefix": "\\bind"
+  },
+  {
+    "cmd": "\\bind_named",
+    "args": "STMT_NAME [PARAM]...",
+    "desc": "set query parameters for an existing prepared statement",
+    "category": "Extended Query Protocol",
+    "prefix": "\\bind_named"
+  },
+  {
+    "cmd": "\\close_prepared",
+    "args": "STMT_NAME",
+    "desc": "close an existing prepared statement",
+    "category": "Extended Query Protocol",
+    "prefix": "\\close_prepared"
+  },
+  {
+    "cmd": "\\endpipeline",
+    "args": "",
+    "desc": "exit pipeline mode",
+    "category": "Extended Query Protocol",
+    "prefix": "\\endpipeline"
+  },
+  {
+    "cmd": "\\flush",
+    "args": "",
+    "desc": "flush output data to the server",
+    "category": "Extended Query Protocol",
+    "prefix": "\\flush"
+  },
+  {
+    "cmd": "\\flushrequest",
+    "args": "",
+    "desc": "send request to the server to flush its output buffer",
+    "category": "Extended Query Protocol",
+    "prefix": "\\flushrequest"
+  },
+  {
+    "cmd": "\\getresults",
+    "args": "[NUM_RES]",
+    "desc": "read NUM_RES pending results, or all if no argument",
+    "category": "Extended Query Protocol",
+    "prefix": "\\getresults"
+  },
+  {
+    "cmd": "\\parse",
+    "args": "STMT_NAME",
+    "desc": "create a prepared statement",
+    "category": "Extended Query Protocol",
+    "prefix": "\\parse"
+  },
+  {
+    "cmd": "\\sendpipeline",
+    "args": "",
+    "desc": "send an extended query to an ongoing pipeline",
+    "category": "Extended Query Protocol",
+    "prefix": "\\sendpipeline"
+  },
+  {
+    "cmd": "\\startpipeline",
+    "args": "",
+    "desc": "enter pipeline mode",
+    "category": "Extended Query Protocol",
+    "prefix": "\\startpipeline"
+  },
+  {
+    "cmd": "\\syncpipeline",
+    "args": "",
+    "desc": "add a synchronisation point to an ongoing pipeline",
+    "category": "Extended Query Protocol",
+    "prefix": "\\syncpipeline"
+  }
+]

@@ -5,7 +5,7 @@ const fs = require('fs');
 const { spawn } = require('child_process');
 const { WebSocketServer } = require('ws');
 const pty = require('node-pty');
-const { openTunnelChain } = require('./ssh-tunnel');
+const { openTunnelChain, openSshShell } = require('./ssh-tunnel');
 
 function loadBastions() {
   try { return JSON.parse(fs.readFileSync(bastionsFile, 'utf-8')); }
@@ -26,6 +26,32 @@ function readPrivateKey(p, ctx) {
   return content;
 }
 
+function resolveBastionCreds(source, ctx) {
+  if (!source || !source.host || !source.user) {
+    throw new Error(`${ctx}: host and user are required`);
+  }
+  const keyPath = source.privateKeyPath;
+  // Legacy fallback: inline privateKey content stored directly in the bastion
+  // (pre-volume-mount layout). Kept working so old configs don't break, but
+  // new bastions must use privateKeyPath so the key never ends up in
+  // bastions.json / backups.
+  let privateKey;
+  if (keyPath) {
+    privateKey = readPrivateKey(keyPath, `${ctx} (${source.host})`);
+  } else if (source.privateKey) {
+    privateKey = source.privateKey;
+  } else {
+    throw new Error(`${ctx} (${source.host}): privateKeyPath is required`);
+  }
+  return {
+    host: source.host,
+    port: source.port,
+    user: source.user,
+    privateKey,
+    passphrase: source.passphrase,
+  };
+}
+
 function resolveHops(hops) {
   const bastions = loadBastions();
   const byId = new Map(bastions.map((b) => [b.id, b]));
@@ -35,29 +61,7 @@ function resolveHops(hops) {
     if (hop && hop.bastionId && !source) {
       throw new Error(`${ctx}: bastion ${hop.bastionId} not found`);
     }
-    if (!source || !source.host || !source.user) {
-      throw new Error(`${ctx}: host and user are required`);
-    }
-    const keyPath = source.privateKeyPath;
-    // Legacy fallback: inline privateKey content stored directly in the bastion
-    // (pre-volume-mount layout). Kept working so old configs don't break, but
-    // new bastions must use privateKeyPath so the key never ends up in
-    // bastions.json / backups.
-    let privateKey;
-    if (keyPath) {
-      privateKey = readPrivateKey(keyPath, `${ctx} (${source.host})`);
-    } else if (source.privateKey) {
-      privateKey = source.privateKey;
-    } else {
-      throw new Error(`${ctx} (${source.host}): privateKeyPath is required`);
-    }
-    return {
-      host: source.host,
-      port: source.port,
-      user: source.user,
-      privateKey,
-      passphrase: source.passphrase,
-    };
+    return resolveBastionCreds(source, ctx);
   });
 }
 
@@ -180,6 +184,12 @@ app.get('/api/bastions', (_req, res) => {
   res.json(loadBastions());
 });
 
+app.get('/api/psql-meta', (_req, res) => {
+  // Bundled list of psql backslash commands (extracted from `psql 18 -c '\?'`).
+  // Lives under server/ so it ships with the Docker image (data/ is a user volume).
+  res.type('application/json').sendFile(path.join(__dirname, 'psql-meta.json'));
+});
+
 app.get('/api/keys', (_req, res) => {
   try {
     const entries = fs.readdirSync(KEYS_DIR, { withFileTypes: true });
@@ -220,9 +230,16 @@ app.post('/api/query', async (req, res) => {
     ? { ...connection, host: tunnel.localHost, port: String(tunnel.localPort) }
     : connection;
 
-  const args = ['--csv', '--no-psqlrc', '-w', '-c', String(query).trim(), ...buildPsqlArgs(effectiveConn)];
+  const trimmedQuery = String(query).trim();
+  const isMeta = /(^|\n)\s*\\[a-zA-Z?!+]/.test(trimmedQuery);
+
+  // Meta-commands can't run under `--csv` (psql refuses). Use plain aligned output and
+  // disable the pager so output stays on stdout. Otherwise keep the existing CSV path.
+  const args = isMeta
+    ? ['--no-psqlrc', '-w', '-P', 'pager=off', '-c', trimmedQuery, ...buildPsqlArgs(effectiveConn)]
+    : ['--csv', '--no-psqlrc', '-w', '-c', trimmedQuery, ...buildPsqlArgs(effectiveConn)];
   const env = buildPsqlEnv(connection);
-  log('executeQuery host:', connection.host, tunnel ? `(via tunnel -> 127.0.0.1:${tunnel.localPort})` : '', 'queryId:', queryId);
+  log('executeQuery host:', connection.host, tunnel ? `(via tunnel -> 127.0.0.1:${tunnel.localPort})` : '', 'queryId:', queryId, isMeta ? '(meta)' : '');
 
   const proc = spawn(findPsqlBin(), args, { env });
   if (queryId) runningQueries.set(queryId, proc);
@@ -254,6 +271,15 @@ app.post('/api/query', async (req, res) => {
     if (cancelled) return respond({ error: 'Query cancelled', duration, cancelled: true });
     if (code !== 0) return respond({ error: stderr.trim() || `psql exited with code ${code}`, duration });
 
+    if (isMeta) {
+      return respond({
+        isMetacommand: true,
+        raw: stdout,
+        stderr: stderr.trim() || null,
+        duration,
+      });
+    }
+
     try {
       const lines = stdout.trim().split('\n');
       if (lines.length === 0 || !lines[0]) {
@@ -281,13 +307,93 @@ app.delete('/api/query/:id', (req, res) => {
   res.json({ ok: true });
 });
 
+// Probe a connection without persisting it. For shell-mode connections we walk
+// the SSH chain up to the selected hop and tear it down — that proves the chain
+// and credentials work. For psql-mode we additionally run `select 1` through
+// the tunnel to validate Postgres-side auth/network.
+app.post('/api/test-connection', async (req, res) => {
+  const { connection } = req.body || {};
+  if (!connection) return res.status(400).json({ ok: false, error: 'connection is required' });
+
+  const startTime = Date.now();
+  const isShell = connection.terminalMode === 'shell';
+
+  if (isShell) {
+    const tunnelCfg = connection.tunnel;
+    const rawHops = (tunnelCfg && tunnelCfg.enabled && Array.isArray(tunnelCfg.hops)) ? tunnelCfg.hops : [];
+    if (rawHops.length === 0) {
+      return res.json({ ok: false, error: 'shell mode requires an enabled SSH tunnel with at least one hop', duration: Date.now() - startTime });
+    }
+    let resolvedHops, sshShell;
+    try { resolvedHops = resolveHops(rawHops); }
+    catch (err) { return res.json({ ok: false, error: err.message, duration: Date.now() - startTime }); }
+
+    const requested = Number.isInteger(connection.shellHopIndex)
+      ? connection.shellHopIndex
+      : resolvedHops.length - 1;
+    if (requested < 0 || requested >= resolvedHops.length) {
+      return res.json({ ok: false, error: `shell hop index out of range: ${requested}`, duration: Date.now() - startTime });
+    }
+
+    try {
+      sshShell = await openSshShell({ hops: resolvedHops, targetHopIndex: requested, cols: 80, rows: 24 });
+    } catch (err) {
+      return res.json({ ok: false, error: `SSH: ${err.message}`, duration: Date.now() - startTime });
+    }
+    try { sshShell.close(); } catch {}
+    return res.json({
+      ok: true,
+      message: `SSH shell on hop ${requested + 1}/${resolvedHops.length}`,
+      duration: Date.now() - startTime,
+    });
+  }
+
+  // psql mode: open tunnel (if any) + run `select 1`.
+  let tunnel = null;
+  try {
+    tunnel = await maybeOpenTunnel(connection);
+  } catch (err) {
+    return res.json({ ok: false, error: `SSH tunnel: ${err.message}`, duration: Date.now() - startTime });
+  }
+  const effectiveConn = tunnel
+    ? { ...connection, host: tunnel.localHost, port: String(tunnel.localPort) }
+    : connection;
+  const args = ['--csv', '--no-psqlrc', '-w', '-c', 'select 1', ...buildPsqlArgs(effectiveConn)];
+  const env = buildPsqlEnv(connection);
+  const proc = spawn(findPsqlBin(), args, { env });
+
+  let stderr = '';
+  proc.stderr.on('data', (c) => { stderr += c.toString(); });
+  proc.on('error', (err) => {
+    if (tunnel) { try { tunnel.close(); } catch {} }
+    res.json({ ok: false, error: err.message, duration: Date.now() - startTime });
+  });
+  proc.on('close', (code) => {
+    if (tunnel) { try { tunnel.close(); } catch {} }
+    if (code === 0) {
+      res.json({
+        ok: true,
+        message: tunnel ? 'psql via tunnel' : 'direct psql',
+        duration: Date.now() - startTime,
+      });
+    } else {
+      res.json({
+        ok: false,
+        error: stderr.trim() || `psql exited with code ${code}`,
+        duration: Date.now() - startTime,
+      });
+    }
+  });
+});
+
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws/pty' });
 
 wss.on('connection', (ws, req) => {
   const url = new URL(req.url, 'http://x');
   const tabId = url.searchParams.get('tabId') || 'default';
-  let shell = null;
+  let shell = null;          // node-pty PTY (psql mode)
+  let sshShell = null;       // { stream, close } from openSshShell (shell mode)
   let tunnel = null;
 
   const safeSend = (payload) => {
@@ -302,16 +408,70 @@ wss.on('connection', (ws, req) => {
     }
   };
 
+  const teardown = () => {
+    if (shell) { try { shell.kill(); } catch {} shell = null; }
+    if (sshShell) { try { sshShell.close(); } catch {} sshShell = null; }
+    closeTunnel();
+  };
+
   ws.on('message', async (raw) => {
     let msg;
     try { msg = JSON.parse(raw.toString()); } catch { return; }
 
     if (msg.type === 'spawn') {
       try {
-        if (shell) { try { shell.kill(); } catch {} shell = null; }
-        closeTunnel();
+        teardown();
         const connection = msg.connection || {};
 
+        if (connection.terminalMode === 'shell') {
+          const tunnelCfg = connection.tunnel;
+          const rawHops = (tunnelCfg && tunnelCfg.enabled && Array.isArray(tunnelCfg.hops)) ? tunnelCfg.hops : [];
+          let resolvedHops = [];
+          let targetHopIndex = 0;
+
+          try {
+            if (rawHops.length === 0) {
+              throw new Error('shell mode requires an enabled SSH tunnel with at least one hop');
+            }
+            resolvedHops = resolveHops(rawHops);
+            const requested = Number.isInteger(connection.shellHopIndex)
+              ? connection.shellHopIndex
+              : resolvedHops.length - 1;
+            if (requested < 0 || requested >= resolvedHops.length) {
+              throw new Error(`shell hop index out of range: ${requested} (chain has ${resolvedHops.length} hop(s))`);
+            }
+            targetHopIndex = requested;
+          } catch (err) {
+            log('SSH shell config error:', err.message);
+            safeSend(JSON.stringify({ type: 'error', message: err.message }));
+            return;
+          }
+
+          log('SSH shell spawn tabId:', tabId, 'targetHop:', targetHopIndex + 1, '/', resolvedHops.length);
+          try {
+            sshShell = await openSshShell({
+              hops: resolvedHops,
+              targetHopIndex,
+              cols: msg.cols || 120,
+              rows: msg.rows || 30,
+            });
+          } catch (err) {
+            log('SSH shell error:', err.message);
+            safeSend(JSON.stringify({ type: 'error', message: `SSH shell: ${err.message}` }));
+            return;
+          }
+
+          sshShell.stream.on('data', (data) => safeSend(Buffer.from(data)));
+          sshShell.stream.stderr?.on('data', (data) => safeSend(Buffer.from(data)));
+          sshShell.stream.on('close', () => {
+            safeSend(JSON.stringify({ type: 'exit', exitCode: 0 }));
+            sshShell = null;
+          });
+          safeSend(JSON.stringify({ type: 'ready' }));
+          return;
+        }
+
+        // psql mode (default, backwards compatible)
         try {
           tunnel = await maybeOpenTunnel(connection);
         } catch (err) {
@@ -346,25 +506,25 @@ wss.on('connection', (ws, req) => {
         safeSend(JSON.stringify({ type: 'ready' }));
       } catch (err) {
         log('PTY spawn error:', err.message);
-        closeTunnel();
+        teardown();
         safeSend(JSON.stringify({ type: 'error', message: err.message }));
       }
     } else if (msg.type === 'write') {
       try { shell?.write(msg.data); } catch {}
+      try { sshShell?.stream.write(msg.data); } catch {}
     } else if (msg.type === 'resize') {
       try { shell?.resize(msg.cols, msg.rows); } catch {}
+      try { sshShell?.stream.setWindow(msg.rows, msg.cols, 0, 0); } catch {}
     } else if (msg.type === 'send-query') {
+      // No-op in shell mode (the client hides the button, but defend in depth).
       try { shell?.write(String(msg.query || '').trim() + '\r'); } catch {}
     } else if (msg.type === 'kill') {
-      try { shell?.kill(); } catch {}
-      shell = null;
-      closeTunnel();
+      teardown();
     }
   });
 
   ws.on('close', () => {
-    if (shell) { try { shell.kill(); } catch {} shell = null; }
-    closeTunnel();
+    teardown();
   });
 });
 
