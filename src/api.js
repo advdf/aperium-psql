@@ -258,6 +258,13 @@
       fetch(`/api/query/${encodeURIComponent(queryId)}`, { method: 'DELETE' }).catch(() => {});
     },
 
+    testConnection: (connection) =>
+      fetch('/api/test-connection', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ connection }),
+      }).then((r) => r.json()),
+
     onPtyData: (cb) => { ptyDataCb = cb; },
     onPtyExit: (cb) => { ptyExitCb = cb; },
   };

@@ -323,6 +323,7 @@ async function openEditDialog(conn) {
   renderShellForm(conn);
   updateGroupSuggestions();
   setDialogDeleteVisibility(true);
+  hideDialogToast();
   dialog.showModal();
 }
 
@@ -342,6 +343,7 @@ async function openDuplicateDialog(conn) {
   renderShellForm(conn);
   updateGroupSuggestions();
   setDialogDeleteVisibility(false);
+  hideDialogToast();
   dialog.showModal();
 }
 
@@ -2362,6 +2364,7 @@ btnNewConn.addEventListener('click', async () => {
   renderShellForm(null);
   updateGroupSuggestions();
   setDialogDeleteVisibility(false);
+  hideDialogToast();
   dialog.showModal();
 });
 
@@ -2402,14 +2405,67 @@ function showConfirm({ title, message, okLabel = 'Delete', okVariant = 'danger' 
   });
 }
 
-// ---- Edit-dialog delete button (with confirmation) ----
+// ---- Edit-dialog actions: kebab menu (Delete / Test connection) ----
+const connMenuWrap = document.getElementById('conn-menu-wrap');
+const btnConnMenu = document.getElementById('btn-conn-menu');
+const connMenu = document.getElementById('conn-menu');
 const btnDeleteConn = document.getElementById('btn-delete-conn');
+const btnTestConn = document.getElementById('btn-test-conn');
+const dialogToast = document.getElementById('dialog-toast');
 
 function setDialogDeleteVisibility(visible) {
-  btnDeleteConn.classList.toggle('hidden', !visible);
+  // Same gating as before: kebab is shown only on the edit dialog (existing
+  // connection), hidden on New/Duplicate.
+  connMenuWrap.classList.toggle('hidden', !visible);
+  if (!visible) closeConnMenu();
+}
+
+function openConnMenu() {
+  connMenu.classList.remove('hidden');
+  btnConnMenu.setAttribute('aria-expanded', 'true');
+  // Focus first item for keyboard nav.
+  requestAnimationFrame(() => btnTestConn.focus());
+}
+function closeConnMenu() {
+  connMenu.classList.add('hidden');
+  btnConnMenu.setAttribute('aria-expanded', 'false');
+}
+function toggleConnMenu() {
+  if (connMenu.classList.contains('hidden')) openConnMenu();
+  else closeConnMenu();
+}
+
+btnConnMenu.addEventListener('click', (e) => {
+  e.stopPropagation();
+  toggleConnMenu();
+});
+// Close on outside click / Esc.
+document.addEventListener('click', (e) => {
+  if (connMenu.classList.contains('hidden')) return;
+  if (e.target.closest('#conn-menu') || e.target.closest('#btn-conn-menu')) return;
+  closeConnMenu();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !connMenu.classList.contains('hidden')) {
+    e.stopPropagation();
+    closeConnMenu();
+    btnConnMenu.focus();
+  }
+});
+
+function showDialogToast(kind, text) {
+  dialogToast.className = `dialog-toast dialog-toast-${kind}`;
+  dialogToast.innerHTML = (kind === 'loading'
+    ? '<span class="toast-spinner" aria-hidden="true"></span>'
+    : '') + `<span>${escapeHtml(text)}</span>`;
+}
+function hideDialogToast() {
+  dialogToast.className = 'dialog-toast hidden';
+  dialogToast.innerHTML = '';
 }
 
 btnDeleteConn.addEventListener('click', async () => {
+  closeConnMenu();
   const id = form.elements.id.value;
   if (!id) return;
   const conn = connections.find((c) => c.id === id);
@@ -2423,6 +2479,35 @@ btnDeleteConn.addEventListener('click', async () => {
   if (!confirmed) return;
   await deleteConnection(id);
   dialog.close();
+});
+
+btnTestConn.addEventListener('click', async () => {
+  closeConnMenu();
+  // Build a temporary connection object from the current form state — that way
+  // the user can test edits before saving them.
+  const data = Object.fromEntries(new FormData(form));
+  delete data.id; delete data['tunnel-enabled']; delete data['terminal-shell']; delete data['shell-target'];
+  const tunnel = readTunnelFromForm();
+  tunnel.hops = tunnel.hops.filter((h) => h.bastionId || h.host || h.user || h.privateKey);
+  data.tunnel = tunnel;
+  const shellCfg = readShellFromForm();
+  if (shellCfg.terminalMode === 'shell') {
+    data.terminalMode = 'shell';
+    data.shellHopIndex = shellCfg.shellHopIndex;
+  }
+
+  showDialogToast('loading', 'Testing connection…');
+  try {
+    const result = await window.api.testConnection(data);
+    if (result.ok) {
+      showDialogToast('ok', `Connection OK • ${result.message || ''} (${result.duration}ms)`.trim());
+      setTimeout(() => hideDialogToast(), 4500);
+    } else {
+      showDialogToast('error', result.error || 'Connection failed');
+    }
+  } catch (err) {
+    showDialogToast('error', err.message || 'Connection failed');
+  }
 });
 
 form.addEventListener('submit', async (e) => {

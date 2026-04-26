@@ -236,7 +236,31 @@
   <!-- Connection dialog -->
   <dialog id="connection-dialog">
     <form id="connection-form" method="dialog">
-      <h3 id="dialog-title">New Connection</h3>
+      <div class="dialog-header">
+        <h3 id="dialog-title">New Connection</h3>
+        <div class="dialog-menu-wrap hidden" id="conn-menu-wrap">
+          <button type="button" id="btn-conn-menu" class="dialog-kebab" title="More actions" aria-haspopup="true" aria-expanded="false" aria-controls="conn-menu">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <circle cx="12" cy="5"  r="1.8"/>
+              <circle cx="12" cy="12" r="1.8"/>
+              <circle cx="12" cy="19" r="1.8"/>
+            </svg>
+          </button>
+          <div id="conn-menu" class="conn-menu hidden" role="menu" aria-labelledby="btn-conn-menu">
+            <button type="button" id="btn-test-conn" class="conn-menu-item" role="menuitem">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+              <span>Test connection</span>
+            </button>
+            <button type="button" id="btn-delete-conn" class="conn-menu-item conn-menu-item-danger" role="menuitem">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M3 6h18"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
+              </svg>
+              <span>Delete</span>
+            </button>
+          </div>
+        </div>
+      </div>
+      <div id="dialog-toast" class="dialog-toast hidden" role="status" aria-live="polite"></div>
       <label>
         Group
         <div class="group-input-wrapper">
@@ -308,7 +332,6 @@
 
       <input type="hidden" name="id" value="">
       <div class="dialog-actions">
-        <button type="button" id="btn-delete-conn" class="dialog-delete hidden" title="Delete this connection">🗑</button>
         <button type="button" id="btn-cancel">Cancel</button>
         <button type="submit">Save</button>
       </div>

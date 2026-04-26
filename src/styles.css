@@ -1554,22 +1554,140 @@ dialog .radio-label input[type="radio"]:disabled + span {
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
-.dialog-delete {
+/* Connection dialog header (title + kebab menu) */
+.dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+.dialog-header h3 {
+  margin: 0;
+}
+
+.dialog-menu-wrap {
+  position: relative;
+}
+.dialog-menu-wrap.hidden { display: none; }
+
+.dialog-kebab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
   background: transparent;
-  border: 1px solid var(--border);
-  color: var(--red);
-  padding: 6px 10px;
-  border-radius: var(--radius);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--text-dim);
   cursor: pointer;
-  font-size: 14px;
-  margin-right: auto;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
 }
-.dialog-delete:hover {
-  background: var(--red);
-  color: var(--bg);
-  border-color: var(--red);
+.dialog-kebab:hover,
+.dialog-kebab[aria-expanded="true"] {
+  background: var(--bg-overlay);
+  color: var(--text);
+  border-color: var(--border);
 }
-.dialog-delete.hidden { display: none; }
+.dialog-kebab:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.conn-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  min-width: 180px;
+  padding: 4px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.conn-menu.hidden { display: none; }
+
+.conn-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+.conn-menu-item:hover,
+.conn-menu-item:focus-visible {
+  background: var(--bg-overlay);
+  outline: none;
+}
+.conn-menu-item svg {
+  flex-shrink: 0;
+  color: var(--text-dim);
+}
+.conn-menu-item:hover svg { color: var(--text); }
+.conn-menu-item-danger { color: var(--red); }
+.conn-menu-item-danger svg { color: var(--red); }
+.conn-menu-item-danger:hover {
+  background: rgba(243, 139, 168, 0.12);
+  color: var(--red);
+}
+.conn-menu-item-danger:hover svg { color: var(--red); }
+
+/* Inline toast inside the connection dialog (test-connection feedback). */
+.dialog-toast {
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  font-size: 12.5px;
+  line-height: 1.4;
+  border: 1px solid var(--border);
+  background: var(--bg-overlay);
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  animation: dialogToastFade 160ms ease;
+}
+.dialog-toast.hidden { display: none; }
+.dialog-toast.dialog-toast-ok {
+  border-color: rgba(166, 227, 161, 0.45);
+  background: rgba(166, 227, 161, 0.08);
+  color: var(--green);
+}
+.dialog-toast.dialog-toast-error {
+  border-color: rgba(243, 139, 168, 0.45);
+  background: rgba(243, 139, 168, 0.10);
+  color: var(--red);
+}
+.dialog-toast.dialog-toast-loading {
+  color: var(--text-dim);
+}
+.dialog-toast .toast-spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+
+@keyframes dialogToastFade {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
 
 #tunnel-hops {
   border: 1px solid var(--border);

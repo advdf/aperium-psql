@@ -307,6 +307,85 @@ app.delete('/api/query/:id', (req, res) => {
   res.json({ ok: true });
 });
 
+// Probe a connection without persisting it. For shell-mode connections we walk
+// the SSH chain up to the selected hop and tear it down — that proves the chain
+// and credentials work. For psql-mode we additionally run `select 1` through
+// the tunnel to validate Postgres-side auth/network.
+app.post('/api/test-connection', async (req, res) => {
+  const { connection } = req.body || {};
+  if (!connection) return res.status(400).json({ ok: false, error: 'connection is required' });
+
+  const startTime = Date.now();
+  const isShell = connection.terminalMode === 'shell';
+
+  if (isShell) {
+    const tunnelCfg = connection.tunnel;
+    const rawHops = (tunnelCfg && tunnelCfg.enabled && Array.isArray(tunnelCfg.hops)) ? tunnelCfg.hops : [];
+    if (rawHops.length === 0) {
+      return res.json({ ok: false, error: 'shell mode requires an enabled SSH tunnel with at least one hop', duration: Date.now() - startTime });
+    }
+    let resolvedHops, sshShell;
+    try { resolvedHops = resolveHops(rawHops); }
+    catch (err) { return res.json({ ok: false, error: err.message, duration: Date.now() - startTime }); }
+
+    const requested = Number.isInteger(connection.shellHopIndex)
+      ? connection.shellHopIndex
+      : resolvedHops.length - 1;
+    if (requested < 0 || requested >= resolvedHops.length) {
+      return res.json({ ok: false, error: `shell hop index out of range: ${requested}`, duration: Date.now() - startTime });
+    }
+
+    try {
+      sshShell = await openSshShell({ hops: resolvedHops, targetHopIndex: requested, cols: 80, rows: 24 });
+    } catch (err) {
+      return res.json({ ok: false, error: `SSH: ${err.message}`, duration: Date.now() - startTime });
+    }
+    try { sshShell.close(); } catch {}
+    return res.json({
+      ok: true,
+      message: `SSH shell on hop ${requested + 1}/${resolvedHops.length}`,
+      duration: Date.now() - startTime,
+    });
+  }
+
+  // psql mode: open tunnel (if any) + run `select 1`.
+  let tunnel = null;
+  try {
+    tunnel = await maybeOpenTunnel(connection);
+  } catch (err) {
+    return res.json({ ok: false, error: `SSH tunnel: ${err.message}`, duration: Date.now() - startTime });
+  }
+  const effectiveConn = tunnel
+    ? { ...connection, host: tunnel.localHost, port: String(tunnel.localPort) }
+    : connection;
+  const args = ['--csv', '--no-psqlrc', '-w', '-c', 'select 1', ...buildPsqlArgs(effectiveConn)];
+  const env = buildPsqlEnv(connection);
+  const proc = spawn(findPsqlBin(), args, { env });
+
+  let stderr = '';
+  proc.stderr.on('data', (c) => { stderr += c.toString(); });
+  proc.on('error', (err) => {
+    if (tunnel) { try { tunnel.close(); } catch {} }
+    res.json({ ok: false, error: err.message, duration: Date.now() - startTime });
+  });
+  proc.on('close', (code) => {
+    if (tunnel) { try { tunnel.close(); } catch {} }
+    if (code === 0) {
+      res.json({
+        ok: true,
+        message: tunnel ? 'psql via tunnel' : 'direct psql',
+        duration: Date.now() - startTime,
+      });
+    } else {
+      res.json({
+        ok: false,
+        error: stderr.trim() || `psql exited with code ${code}`,
+        duration: Date.now() - startTime,
+      });
+    }
+  });
+});
+
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws/pty' });
 
