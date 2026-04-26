@@ -214,6 +214,25 @@
     </section>
   </dialog>
 
+  <!-- Generic confirmation dialog -->
+  <dialog id="confirm-dialog" class="confirm-dialog">
+    <div class="confirm-icon" aria-hidden="true">
+      <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M3 6h18"></path>
+        <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path>
+        <path d="M10 11v6"></path>
+        <path d="M14 11v6"></path>
+        <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"></path>
+      </svg>
+    </div>
+    <h3 id="confirm-title">Delete connection?</h3>
+    <p id="confirm-message">This action cannot be undone.</p>
+    <div class="confirm-actions">
+      <button type="button" id="btn-confirm-cancel" class="confirm-cancel">Cancel</button>
+      <button type="button" id="btn-confirm-ok" class="confirm-ok">Delete</button>
+    </div>
+  </dialog>
+
   <!-- Connection dialog -->
   <dialog id="connection-dialog">
     <form id="connection-form" method="dialog">
@@ -274,8 +293,22 @@
         </div>
       </fieldset>
 
+      <label class="checkbox-label">
+        <input type="checkbox" id="terminal-shell" name="terminal-shell">
+        <span>Open shell (SH) instead of psql</span>
+      </label>
+      <fieldset id="shell-options" class="hidden">
+        <legend>Shell target</legend>
+        <p class="tunnel-note">Pick the hop on which the interactive SSH shell should open. Useful for legacy VM-hosted databases where you also need shell access (logs, restarts…).</p>
+        <label>
+          Open shell on
+          <select id="shell-hop-index"></select>
+        </label>
+      </fieldset>
+
       <input type="hidden" name="id" value="">
       <div class="dialog-actions">
+        <button type="button" id="btn-delete-conn" class="dialog-delete hidden" title="Delete this connection">🗑</button>
         <button type="button" id="btn-cancel">Cancel</button>
         <button type="submit">Save</button>
       </div>

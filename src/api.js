@@ -200,6 +200,8 @@
 
     listKeys: () => fetch('/api/keys').then((r) => r.json()),
 
+    loadPsqlMeta: () => fetch('/api/psql-meta').then((r) => r.json()).catch(() => []),
+
     openSnippetsInEditor: async () => {
       const current = await api.loadSnippets();
       if (!current) return { needsInit: true, path: 'snippets.json' };
