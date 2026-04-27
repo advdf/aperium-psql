@@ -88,6 +88,29 @@ async function init() {
       }
     }
   });
+
+  handleOpenParam();
+}
+
+function handleOpenParam() {
+  const params = new URLSearchParams(window.location.search);
+  const target = params.get('open');
+  if (!target) return;
+
+  const url = new URL(window.location.href);
+  url.searchParams.delete('open');
+  history.replaceState(null, '', url.pathname + url.search + url.hash);
+
+  const conn =
+    connections.find((c) => c.id === target) ||
+    connections.find((c) => c.name === target);
+
+  if (!conn) {
+    welcome.textContent = `Connection not found: ${target}`;
+    return;
+  }
+
+  openTab(conn);
 }
 
 // ---- Query history ----
