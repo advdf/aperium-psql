@@ -14,8 +14,15 @@ services:
       - APERIUM_DATA_DIR=/data
       - PORT=8080
       - TZ=${TZ:-UTC}
+      - PG_HOST=postgres
+      - PG_PORT=5432
+      - PG_USER=aperium
+      - PG_PASSWORD=aperium
+      - PG_DATABASE=aperium
+      - SESSION_SECRET=${SESSION_SECRET:-aperium-dev-secret-change-in-production}
     networks:
       - public
+      - internal
     depends_on:
       - postgres
       - bastion
