@@ -8,12 +8,25 @@ const { DATA_DIR } = require('../dataPath');
 
 const router = express.Router();
 
+const USER_COLUMNS = 'id, email, display_name, password_hash, avatar_url, role, created_at, updated_at';
+
 const ARGON_OPTS = {
   type: argon2.argon2id,
   memoryCost: 65536,
   timeCost: 3,
   parallelism: 1,
 };
+
+// Server-driven mapping from MIME type to canonical extension. Avoids trusting
+// the client-supplied filename for what we write to disk.
+const MIME_TO_EXT = {
+  'image/png': '.png',
+  'image/jpeg': '.jpg',
+  'image/jpg': '.jpg',
+  'image/gif': '.gif',
+  'image/webp': '.webp',
+};
+const AVATAR_EXTS = Array.from(new Set(Object.values(MIME_TO_EXT)));
 
 function isValidEmail(s) {
   return typeof s === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
@@ -29,14 +42,34 @@ function publicUser(u) {
   };
 }
 
+function findAvatarFile(userId) {
+  const dir = path.join(DATA_DIR, userId);
+  for (const ext of AVATAR_EXTS) {
+    const f = path.join(dir, `avatar${ext}`);
+    if (fs.existsSync(f)) return f;
+  }
+  return null;
+}
+
+function clearAvatarFiles(userId) {
+  const dir = path.join(DATA_DIR, userId);
+  for (const ext of AVATAR_EXTS) {
+    const f = path.join(dir, `avatar${ext}`);
+    try { fs.unlinkSync(f); } catch {}
+  }
+}
+
 const avatarStorage = multer.diskStorage({
   destination: (req, _file, cb) => {
     const dir = path.join(DATA_DIR, req.session.userId);
     fs.mkdirSync(dir, { recursive: true });
+    // Remove any prior avatar.* before writing the new one so subsequent
+    // GETs return the latest upload regardless of extension order.
+    clearAvatarFiles(req.session.userId);
     cb(null, dir);
   },
   filename: (_req, file, cb) => {
-    const ext = (path.extname(file.originalname) || '.png').toLowerCase();
+    const ext = MIME_TO_EXT[file.mimetype] || '.png';
     cb(null, `avatar${ext}`);
   },
 });
@@ -44,7 +77,7 @@ const avatarUpload = multer({
   storage: avatarStorage,
   limits: { fileSize: 2 * 1024 * 1024 },
   fileFilter: (_req, file, cb) => {
-    if (/^image\/(png|jpe?g|gif|webp)$/.test(file.mimetype)) cb(null, true);
+    if (MIME_TO_EXT[file.mimetype]) cb(null, true);
     else cb(new Error('Unsupported image type'));
   },
 });
@@ -55,14 +88,19 @@ router.put('/', (req, res) => {
     avatarUpload.single('avatar')(req, res, async (err) => {
       if (err) return res.status(400).json({ error: err.message });
       try {
-        const avatarUrl = req.file ? '/api/profile/avatar?v=' + Date.now() : null;
+        const avatarUrl = req.file
+          ? `/api/profile/avatar/${req.session.userId}?v=${Date.now()}`
+          : null;
         if (avatarUrl) {
           await pool.query(
             'UPDATE aperium.users SET avatar_url = $1, updated_at = now() WHERE id = $2',
             [avatarUrl, req.session.userId]
           );
         }
-        const { rows } = await pool.query('SELECT * FROM aperium.users WHERE id = $1', [req.session.userId]);
+        const { rows } = await pool.query(
+          `SELECT ${USER_COLUMNS} FROM aperium.users WHERE id = $1`,
+          [req.session.userId]
+        );
         res.json(publicUser(rows[0]));
       } catch (e) {
         res.status(500).json({ error: 'Internal error' });
@@ -75,7 +113,7 @@ router.put('/', (req, res) => {
     const { displayName, email, currentPassword, newPassword } = req.body || {};
     try {
       const { rows: existingRows } = await pool.query(
-        'SELECT * FROM aperium.users WHERE id = $1',
+        `SELECT ${USER_COLUMNS} FROM aperium.users WHERE id = $1`,
         [req.session.userId]
       );
       if (existingRows.length === 0) return res.status(401).json({ error: 'User not found' });
@@ -115,7 +153,7 @@ router.put('/', (req, res) => {
 
       updates.push(`updated_at = now()`);
       params.push(req.session.userId);
-      const sql = `UPDATE aperium.users SET ${updates.join(', ')} WHERE id = $${i} RETURNING *`;
+      const sql = `UPDATE aperium.users SET ${updates.join(', ')} WHERE id = $${i} RETURNING ${USER_COLUMNS}`;
       const { rows } = await pool.query(sql, params);
       res.json(publicUser(rows[0]));
     } catch (err) {
@@ -125,13 +163,23 @@ router.put('/', (req, res) => {
   })();
 });
 
+// Per-user avatar URL — any authenticated user can view any other user's
+// avatar (same trust model as a typical team app). userId must be a UUID
+// to keep the on-disk lookup confined to a known user directory.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+router.get('/avatar/:userId', (req, res) => {
+  const { userId } = req.params;
+  if (!UUID_RE.test(userId)) return res.status(400).end();
+  const f = findAvatarFile(userId);
+  if (!f) return res.status(404).end();
+  res.sendFile(f);
+});
+
+// Back-compat: the current user's own avatar at the unparameterized URL.
 router.get('/avatar', (req, res) => {
-  const dir = path.join(DATA_DIR, req.session.userId);
-  for (const ext of ['.png', '.jpg', '.jpeg', '.gif', '.webp']) {
-    const f = path.join(dir, `avatar${ext}`);
-    if (fs.existsSync(f)) return res.sendFile(f);
-  }
-  res.status(404).end();
+  const f = findAvatarFile(req.session.userId);
+  if (!f) return res.status(404).end();
+  res.sendFile(f);
 });
 
 module.exports = router;

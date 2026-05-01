@@ -20,6 +20,18 @@ services:
       - PG_PASSWORD=aperium
       - PG_DATABASE=aperium
       - SESSION_SECRET=${SESSION_SECRET:-aperium-dev-secret-change-in-production}
+      # Set to 'true' when serving over HTTPS so the session cookie is
+      # marked Secure. Leave unset for plain-HTTP localhost dev.
+      - COOKIE_SECURE=${COOKIE_SECURE:-}
+      # When behind a reverse proxy (nginx/caddy), set to the number of
+      # proxy hops (e.g. 1) so req.ip and the rate limiter see the real
+      # client. See express docs for IP/CIDR forms.
+      - TRUST_PROXY=${TRUST_PROXY:-}
+      # One-shot migration: copy any pre-existing /data/{connections,
+      # snippets,bastions}.json into the directory of the user whose email
+      # matches this value, on their next register or login. Leave unset
+      # if you don't have legacy single-user files to import.
+      - APERIUM_MIGRATE_TO_EMAIL=${APERIUM_MIGRATE_TO_EMAIL:-}
     networks:
       - public
       - internal

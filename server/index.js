@@ -178,8 +178,17 @@ const sessionMiddleware = session({
 });
 app.use(sessionMiddleware);
 
+const trustProxy = process.env.TRUST_PROXY;
+if (trustProxy) {
+  // Accepts numeric hop count, IP/CIDR list, or 'true' for unconditional trust.
+  app.set('trust proxy', /^\d+$/.test(trustProxy) ? Number(trustProxy) : trustProxy);
+}
+
 // Public routes — no auth required
-app.get('/', (_req, res) => res.sendFile(path.join(ROOT, 'src', 'index.html')));
+app.get('/', (req, res) => {
+  if (!req.session?.userId) return res.redirect('/login');
+  res.sendFile(path.join(ROOT, 'src', 'index.html'));
+});
 app.get('/login', (_req, res) => res.sendFile(path.join(ROOT, 'src', 'login.html')));
 
 app.use('/api/auth', authRouter);
@@ -422,9 +431,12 @@ const server = http.createServer(app);
 const wss = new WebSocketServer({ noServer: true });
 
 // Apply session middleware on WebSocket upgrade before handing off to wss
+// Minimal Response shim so express-session (which patches res.end on writes)
+// can't crash the upgrade if it ever decides to touch headers on the read path.
+const noopRes = { setHeader() {}, getHeader() {}, removeHeader() {}, end() {}, writeHead() {} };
 server.on('upgrade', (req, socket, head) => {
   if (req.url && req.url.startsWith('/ws/pty')) {
-    sessionMiddleware(req, {}, () => {
+    sessionMiddleware(req, noopRes, () => {
       if (!req.session?.userId) {
         socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
         socket.destroy();

@@ -1,9 +1,14 @@
 (function () {
-  function avatarHtml(user) {
+  function paintAvatar(node, user) {
+    node.replaceChildren();
     if (user.avatarUrl) {
-      return `<img src="${user.avatarUrl}" alt="avatar">`;
+      const img = document.createElement('img');
+      img.src = user.avatarUrl;
+      img.alt = 'avatar';
+      node.appendChild(img);
+    } else {
+      node.textContent = (user.displayName || user.email || 'U').charAt(0).toUpperCase();
     }
-    return (user.displayName || user.email || 'U').charAt(0).toUpperCase();
   }
 
   function open() {
@@ -18,7 +23,7 @@
         </div>
         <div class="modal-body">
           <div class="profile-avatar-section">
-            <div class="avatar-preview">${avatarHtml(user)}</div>
+            <div class="avatar-preview"></div>
             <label class="btn-secondary avatar-upload-btn">
               Changer l'avatar
               <input type="file" accept="image/*" hidden>
@@ -26,10 +31,10 @@
           </div>
           <div class="profile-form">
             <label>Nom d'affichage
-              <input type="text" name="displayName" value="${(user.displayName || '').replace(/"/g, '&quot;')}">
+              <input type="text" name="displayName">
             </label>
             <label>Email
-              <input type="email" name="email" value="${(user.email || '').replace(/"/g, '&quot;')}">
+              <input type="email" name="email">
             </label>
           </div>
           <details class="password-section">
@@ -52,8 +57,15 @@
     `;
 
     const errEl = root.querySelector('.error-msg');
-    const close = () => root.remove();
+    const preview = root.querySelector('.avatar-preview');
+    const displayInput = root.querySelector('input[name=displayName]');
+    const emailInput = root.querySelector('input[name=email]');
 
+    paintAvatar(preview, user);
+    displayInput.value = user.displayName || '';
+    emailInput.value = user.email || '';
+
+    const close = () => root.remove();
     root.querySelector('.modal-close').addEventListener('click', close);
     root.addEventListener('click', (e) => { if (e.target === root) close(); });
 
@@ -65,8 +77,7 @@
       try {
         const updated = await window.api.updateAvatar(file);
         window.__currentUser = { ...window.__currentUser, ...updated };
-        const preview = root.querySelector('.avatar-preview');
-        preview.innerHTML = `<img src="${updated.avatarUrl}" alt="avatar">`;
+        paintAvatar(preview, updated);
         document.dispatchEvent(new CustomEvent('user-updated', { detail: updated }));
       } catch (err) {
         errEl.textContent = err.message;
@@ -76,8 +87,8 @@
     root.querySelector('.save-btn').addEventListener('click', async () => {
       errEl.textContent = '';
       const data = {
-        displayName: root.querySelector('input[name=displayName]').value.trim(),
-        email: root.querySelector('input[name=email]').value.trim(),
+        displayName: displayInput.value.trim(),
+        email: emailInput.value.trim(),
       };
       const cur = root.querySelector('input[name=currentPassword]').value;
       const next = root.querySelector('input[name=newPassword]').value;

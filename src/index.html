@@ -359,25 +359,20 @@
 
   <script src="/static/src/profile-modal.js"></script>
   <script>
-    // Auth bootstrap — runs before renderer hits any /api endpoint.
-    // Populates the sidebar user header and wires up profile/logout.
+    // GET / is gated server-side: an unauthenticated request is 302'd to
+    // /login before this script ever runs, so we can assume the user exists.
+    // We still fetch /api/auth/me to populate the sidebar header.
     (async function () {
-      let user;
-      try {
-        user = await window.api.getMe();
-      } catch { user = null; }
-      if (!user) {
-        window.location.replace('/login');
-        return;
-      }
-      window.__currentUser = user;
-
       const renderUser = (u) => {
         const header = document.getElementById('user-header');
         const avatar = document.getElementById('user-avatar');
         const name = document.getElementById('user-name');
+        avatar.replaceChildren();
         if (u.avatarUrl) {
-          avatar.innerHTML = `<img src="${u.avatarUrl}" alt="avatar">`;
+          const img = document.createElement('img');
+          img.src = u.avatarUrl;
+          img.alt = 'avatar';
+          avatar.appendChild(img);
         } else {
           avatar.textContent = (u.displayName || u.email || 'U').charAt(0).toUpperCase();
         }
@@ -385,11 +380,18 @@
         name.title = u.email;
         header.classList.remove('hidden');
       };
-      renderUser(user);
 
       document.getElementById('btn-profile').addEventListener('click', () => window.openProfileModal());
       document.getElementById('btn-logout').addEventListener('click', () => window.api.logout());
       document.addEventListener('user-updated', (e) => renderUser(e.detail));
+
+      try {
+        const user = await window.api.getMe();
+        if (user) {
+          window.__currentUser = user;
+          renderUser(user);
+        }
+      } catch {}
     })();
   </script>
   <script src="/static/dist/renderer.bundle.js"></script>
