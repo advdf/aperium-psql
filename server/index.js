@@ -5,10 +5,18 @@ const fs = require('fs');
 const { spawn } = require('child_process');
 const { WebSocketServer } = require('ws');
 const pty = require('node-pty');
+const session = require('express-session');
+const PgSession = require('connect-pg-simple')(session);
 const { openTunnelChain, openSshShell } = require('./ssh-tunnel');
+const { pool, initSchema } = require('./db');
+const { userDataPath, DATA_DIR: USER_DATA_DIR } = require('./dataPath');
+const requireAuth = require('./middleware/requireAuth');
+const authRouter = require('./routes/auth');
+const profileRouter = require('./routes/profile');
 
-function loadBastions() {
-  try { return JSON.parse(fs.readFileSync(bastionsFile, 'utf-8')); }
+function loadBastions(userId) {
+  const file = userDataPath(userId, 'bastions.json');
+  try { return JSON.parse(fs.readFileSync(file, 'utf-8')); }
   catch { return []; }
 }
 
@@ -52,8 +60,8 @@ function resolveBastionCreds(source, ctx) {
   };
 }
 
-function resolveHops(hops) {
-  const bastions = loadBastions();
+function resolveHops(hops, userId) {
+  const bastions = loadBastions(userId);
   const byId = new Map(bastions.map((b) => [b.id, b]));
   return hops.map((hop, i) => {
     const ctx = `hop ${i + 1}`;
@@ -65,10 +73,10 @@ function resolveHops(hops) {
   });
 }
 
-async function maybeOpenTunnel(connection) {
+async function maybeOpenTunnel(connection, userId) {
   const t = connection && connection.tunnel;
   if (!t || !t.enabled || !Array.isArray(t.hops) || t.hops.length === 0) return null;
-  const resolved = resolveHops(t.hops);
+  const resolved = resolveHops(t.hops, userId);
   return openTunnelChain({
     hops: resolved,
     dbHost: connection.host,
@@ -96,10 +104,6 @@ function log(...args) {
 log('=== Server starting ===');
 log('DATA_DIR:', DATA_DIR);
 log('psql binary:', findPsqlBin());
-
-const connectionsFile = path.join(DATA_DIR, 'connections.json');
-const snippetsFile = path.join(DATA_DIR, 'snippets.json');
-const bastionsFile = path.join(DATA_DIR, 'bastions.json');
 
 function storeGet(file, key, fallback) {
   try { return JSON.parse(fs.readFileSync(file, 'utf-8'))[key] ?? fallback; }
@@ -159,29 +163,63 @@ app.use('/static/assets', express.static(path.join(ROOT, 'assets')));
 app.use('/static/src', express.static(path.join(ROOT, 'src')));
 app.use('/static/node_modules', express.static(path.join(ROOT, 'node_modules')));
 
-app.get('/', (_req, res) => res.sendFile(path.join(ROOT, 'src', 'index.html')));
+const sessionMiddleware = session({
+  store: new PgSession({ pool, schemaName: 'aperium', tableName: 'sessions' }),
+  name: 'aperium.sid',
+  secret: process.env.SESSION_SECRET || 'aperium-dev-secret-change-in-production',
+  resave: false,
+  saveUninitialized: false,
+  cookie: {
+    httpOnly: true,
+    sameSite: 'strict',
+    secure: process.env.COOKIE_SECURE === 'true',
+    maxAge: 30 * 24 * 60 * 60 * 1000,
+  },
+});
+app.use(sessionMiddleware);
 
-app.get('/api/connections', (_req, res) => {
-  res.json(storeGet(connectionsFile, 'connections', []));
+const trustProxy = process.env.TRUST_PROXY;
+if (trustProxy) {
+  // Accepts numeric hop count, IP/CIDR list, or 'true' for unconditional trust.
+  app.set('trust proxy', /^\d+$/.test(trustProxy) ? Number(trustProxy) : trustProxy);
+}
+
+// Public routes — no auth required
+app.get('/', (req, res) => {
+  if (!req.session?.userId) return res.redirect('/login');
+  res.sendFile(path.join(ROOT, 'src', 'index.html'));
+});
+app.get('/login', (_req, res) => res.sendFile(path.join(ROOT, 'src', 'login.html')));
+
+app.use('/api/auth', authRouter);
+app.use('/api/profile', requireAuth, profileRouter);
+app.use('/api/', requireAuth);
+
+app.get('/api/connections', (req, res) => {
+  const file = userDataPath(req.session.userId, 'connections.json');
+  res.json(storeGet(file, 'connections', []));
 });
 
 app.put('/api/connections', (req, res) => {
-  storeSet(connectionsFile, 'connections', req.body);
+  const file = userDataPath(req.session.userId, 'connections.json');
+  storeSet(file, 'connections', req.body);
   res.json({ ok: true });
 });
 
-app.get('/api/snippets', (_req, res) => {
-  try { res.json(JSON.parse(fs.readFileSync(snippetsFile, 'utf-8'))); }
+app.get('/api/snippets', (req, res) => {
+  const file = userDataPath(req.session.userId, 'snippets.json');
+  try { res.json(JSON.parse(fs.readFileSync(file, 'utf-8'))); }
   catch { res.json(null); }
 });
 
 app.put('/api/snippets', (req, res) => {
-  fs.writeFileSync(snippetsFile, JSON.stringify(req.body, null, 2));
+  const file = userDataPath(req.session.userId, 'snippets.json');
+  fs.writeFileSync(file, JSON.stringify(req.body, null, 2));
   res.json({ ok: true });
 });
 
-app.get('/api/bastions', (_req, res) => {
-  res.json(loadBastions());
+app.get('/api/bastions', (req, res) => {
+  res.json(loadBastions(req.session.userId));
 });
 
 app.get('/api/psql-meta', (_req, res) => {
@@ -209,7 +247,8 @@ app.get('/api/keys', (_req, res) => {
 
 app.put('/api/bastions', (req, res) => {
   if (!Array.isArray(req.body)) return res.status(400).json({ error: 'expected an array' });
-  fs.writeFileSync(bastionsFile, JSON.stringify(req.body, null, 2));
+  const file = userDataPath(req.session.userId, 'bastions.json');
+  fs.writeFileSync(file, JSON.stringify(req.body, null, 2));
   res.json({ ok: true });
 });
 
@@ -217,10 +256,11 @@ app.post('/api/query', async (req, res) => {
   const { connection, query, queryId } = req.body || {};
   if (!connection || !query) return res.status(400).json({ error: 'connection and query are required' });
 
+  const userId = req.session.userId;
   const startTime = Date.now();
   let tunnel = null;
   try {
-    tunnel = await maybeOpenTunnel(connection);
+    tunnel = await maybeOpenTunnel(connection, userId);
   } catch (err) {
     log('executeQuery tunnel error:', err.message);
     return res.json({ error: `SSH tunnel: ${err.message}`, duration: Date.now() - startTime });
@@ -315,6 +355,7 @@ app.post('/api/test-connection', async (req, res) => {
   const { connection } = req.body || {};
   if (!connection) return res.status(400).json({ ok: false, error: 'connection is required' });
 
+  const userId = req.session.userId;
   const startTime = Date.now();
   const isShell = connection.terminalMode === 'shell';
 
@@ -325,7 +366,7 @@ app.post('/api/test-connection', async (req, res) => {
       return res.json({ ok: false, error: 'shell mode requires an enabled SSH tunnel with at least one hop', duration: Date.now() - startTime });
     }
     let resolvedHops, sshShell;
-    try { resolvedHops = resolveHops(rawHops); }
+    try { resolvedHops = resolveHops(rawHops, userId); }
     catch (err) { return res.json({ ok: false, error: err.message, duration: Date.now() - startTime }); }
 
     const requested = Number.isInteger(connection.shellHopIndex)
@@ -351,7 +392,7 @@ app.post('/api/test-connection', async (req, res) => {
   // psql mode: open tunnel (if any) + run `select 1`.
   let tunnel = null;
   try {
-    tunnel = await maybeOpenTunnel(connection);
+    tunnel = await maybeOpenTunnel(connection, userId);
   } catch (err) {
     return res.json({ ok: false, error: `SSH tunnel: ${err.message}`, duration: Date.now() - startTime });
   }
@@ -387,11 +428,33 @@ app.post('/api/test-connection', async (req, res) => {
 });
 
 const server = http.createServer(app);
-const wss = new WebSocketServer({ server, path: '/ws/pty' });
+const wss = new WebSocketServer({ noServer: true });
+
+// Apply session middleware on WebSocket upgrade before handing off to wss
+// Minimal Response shim so express-session (which patches res.end on writes)
+// can't crash the upgrade if it ever decides to touch headers on the read path.
+const noopRes = { setHeader() {}, getHeader() {}, removeHeader() {}, end() {}, writeHead() {} };
+server.on('upgrade', (req, socket, head) => {
+  if (req.url && req.url.startsWith('/ws/pty')) {
+    sessionMiddleware(req, noopRes, () => {
+      if (!req.session?.userId) {
+        socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+        socket.destroy();
+        return;
+      }
+      wss.handleUpgrade(req, socket, head, (ws) => {
+        wss.emit('connection', ws, req);
+      });
+    });
+  } else {
+    socket.destroy();
+  }
+});
 
 wss.on('connection', (ws, req) => {
   const url = new URL(req.url, 'http://x');
   const tabId = url.searchParams.get('tabId') || 'default';
+  const userId = req.session.userId;
   let shell = null;          // node-pty PTY (psql mode)
   let sshShell = null;       // { stream, close } from openSshShell (shell mode)
   let tunnel = null;
@@ -433,7 +496,7 @@ wss.on('connection', (ws, req) => {
             if (rawHops.length === 0) {
               throw new Error('shell mode requires an enabled SSH tunnel with at least one hop');
             }
-            resolvedHops = resolveHops(rawHops);
+            resolvedHops = resolveHops(rawHops, userId);
             const requested = Number.isInteger(connection.shellHopIndex)
               ? connection.shellHopIndex
               : resolvedHops.length - 1;
@@ -473,7 +536,7 @@ wss.on('connection', (ws, req) => {
 
         // psql mode (default, backwards compatible)
         try {
-          tunnel = await maybeOpenTunnel(connection);
+          tunnel = await maybeOpenTunnel(connection, userId);
         } catch (err) {
           log('PTY tunnel error:', err.message);
           safeSend(JSON.stringify({ type: 'error', message: `SSH tunnel: ${err.message}` }));
@@ -529,9 +592,17 @@ wss.on('connection', (ws, req) => {
 });
 
 const PORT = Number(process.env.PORT) || 8080;
-server.listen(PORT, '0.0.0.0', () => {
-  log(`Aperium PSQL server listening on 0.0.0.0:${PORT}`);
-});
+
+initSchema()
+  .then(() => {
+    server.listen(PORT, '0.0.0.0', () => {
+      log(`Aperium PSQL server listening on 0.0.0.0:${PORT}`);
+    });
+  })
+  .catch((err) => {
+    log('DB schema init failed:', err.message);
+    process.exit(1);
+  });
 
 function shutdown(sig) {
   log(`${sig} received, shutting down`);
