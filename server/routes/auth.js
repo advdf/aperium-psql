@@ -81,7 +81,10 @@ router.post('/register', async (req, res) => {
     req.session.regenerate((err) => {
       if (err) return res.status(500).json({ error: 'Session error' });
       req.session.userId = user.id;
-      res.status(201).json(publicUser(user));
+      req.session.save((saveErr) => {
+        if (saveErr) return res.status(500).json({ error: 'Session error' });
+        res.status(201).json(publicUser(user));
+      });
     });
   } catch (err) {
     console.error('Register error:', err);
@@ -104,7 +107,10 @@ router.post('/login', loginLimiter, async (req, res) => {
     req.session.regenerate((err) => {
       if (err) return res.status(500).json({ error: 'Session error' });
       req.session.userId = user.id;
-      res.json(publicUser(user));
+      req.session.save((saveErr) => {
+        if (saveErr) return res.status(500).json({ error: 'Session error' });
+        res.json(publicUser(user));
+      });
     });
   } catch (err) {
     console.error('Login error:', err);
