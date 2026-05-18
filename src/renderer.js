@@ -2065,7 +2065,7 @@ function renderHopElement(hop = {}, idx = 1) {
   editBtn.addEventListener('click', async () => {
     const id = select.value;
     if (!id) return;
-    await openBastionsManager({ openDetailFor: id });
+    await openBastionsManager({ openDetailFor: id, fromHop: true });
   });
 
   const legacy = el.querySelector('.tunnel-hop-legacy');
@@ -2474,8 +2474,17 @@ async function persistBastions() {
   });
 }
 
+// Where the user should land after Back / Cancel / Save / Delete in the
+// bastion DETAIL view. 'list' is the normal flow (manage bastions from the
+// sidebar gear or the "Manage bastions…" button); 'connection' is the flow
+// triggered by the per-hop pencil button in the connection dialog — there
+// the operator just wanted to tweak one bastion, so unwinding back to the
+// list view is jarring. Reset to 'list' every time the dialog closes.
+let bastionsReturnTarget = 'list';
+
 async function openBastionsManager(opts = {}) {
   await Promise.all([loadBastionsCache(), loadKeysCache()]);
+  bastionsReturnTarget = opts.fromHop ? 'connection' : 'list';
   if (opts.openDetailFor && bastionsCache.some((b) => b.id === opts.openDetailFor)) {
     // Skip the list view and go straight to detail (used by the pencil
     // button next to each hop in the connection dialog).
@@ -2486,12 +2495,28 @@ async function openBastionsManager(opts = {}) {
   if (!bastionsDialog.open) bastionsDialog.showModal();
 }
 
+// Exit the detail view honoring the return target. Used by Back / Cancel /
+// Save / post-Delete handlers so the operator returns to the surface that
+// opened the manager.
+function exitBastionDetail() {
+  if (bastionsReturnTarget === 'connection') {
+    bastionsDialog.close();
+  } else {
+    backToList();
+  }
+}
+
 btnNewBastion.addEventListener('click', () => openBastionDetail('__new__'));
 
-btnBastionBack.addEventListener('click', backToList);
-btnBastionCancel.addEventListener('click', backToList);
+btnBastionBack.addEventListener('click', exitBastionDetail);
+btnBastionCancel.addEventListener('click', exitBastionDetail);
 
 btnBastionsClose.addEventListener('click', () => bastionsDialog.close());
+
+// `close` fires no matter how the dialog ends (button, Esc, save flow,
+// even programmatic). Reset the return target so the next open starts
+// fresh.
+bastionsDialog.addEventListener('close', () => { bastionsReturnTarget = 'list'; });
 
 btnBastionSave.addEventListener('click', async () => {
   const b = readBastionDetailForm();
@@ -2519,19 +2544,19 @@ btnBastionSave.addEventListener('click', async () => {
     if (idx >= 0) bastionsCache[idx] = b; else bastionsCache.push(b);
   }
   await persistBastions();
-  backToList();
+  exitBastionDetail();
 });
 
 btnBastionDelete.addEventListener('click', async () => {
   const isNew = bastionDetailForm.dataset.isNew === 'true';
-  if (isNew) { backToList(); return; }
+  if (isNew) { exitBastionDetail(); return; }
   const id = bastionDetailForm.dataset.id;
   const b = bastionsCache.find((x) => x.id === id);
-  if (!b) { backToList(); return; }
+  if (!b) { exitBastionDetail(); return; }
   if (!confirm(`Delete bastion "${b.name}"? Connections referencing it will break until the hop is repointed.`)) return;
   bastionsCache = bastionsCache.filter((x) => x.id !== id);
   await persistBastions();
-  backToList();
+  exitBastionDetail();
 });
 
 // ---- Backup / restore (encrypted, server-side) ----
