@@ -1,16 +1,18 @@
-// SecretStore abstraction. All sensitive values (Postgres passwords, SSH
-// passphrases, inline private keys, the session secret, and the app DB
-// password) flow through this module instead of living on disk or in env
-// vars. The selected adapter is chosen by APERIUM_KMS:
-//   - "openbao"  → server/secrets/openbao.js
-// Anything else is fatal at boot. There is no plaintext fallback.
+// Wires the rest of the server to OpenBao. All sensitive values (Postgres
+// passwords, SSH passphrases, inline private keys, the session secret, and
+// the app DB password) flow through this module instead of living on disk
+// or in env vars.
 //
-// A "ref" is an opaque string of the form `${adapter}:<adapter-specific>`.
-// Refs are durable: writing the same logical value yields the same ref
-// when an explicit ref is passed (putAt), and a freshly-uuid-suffixed ref
-// when a scope/name is passed (put). Callers that need a stable, well-
-// known ref (e.g. SESSION_SECRET) use putAt; callers persisting one secret
-// per record (e.g. per-connection password) use put.
+// `APERIUM_KMS` must be `openbao` (a sanity check that the operator
+// explicitly chose to run with a KMS — anything else is fatal at boot).
+// There is no plaintext fallback.
+//
+// A "ref" is an opaque string of the form `openbao:<path>`. Refs are
+// durable: writing the same logical value yields the same ref when an
+// explicit ref is passed (putAt), and a freshly-uuid-suffixed ref when a
+// scope/name is passed (put). Callers that need a stable, well-known ref
+// (e.g. SESSION_SECRET) use putAt; callers persisting one secret per
+// record (e.g. per-connection password) use put.
 //
 // All methods are async and throw on transport/auth/shape errors. `get`
 // also throws on missing secrets — callers that want to tolerate 404
@@ -24,23 +26,14 @@ function looksLikeRef(s) {
   return typeof s === 'string' && /^openbao:.+/.test(s);
 }
 
-function refAdapter(ref) {
-  if (!looksLikeRef(ref)) throw new Error(`not a secret ref: ${String(ref).slice(0, 40)}`);
-  return ref.split(':', 1)[0];
-}
-
 function getSecretStore() {
   if (cached) return cached;
   const kind = (process.env.APERIUM_KMS || '').trim().toLowerCase();
-  if (!kind) {
-    throw new Error('APERIUM_KMS is not set. Configure an open-source KMS (openbao) — see docs/kms.md.');
+  if (kind !== 'openbao') {
+    throw new Error('APERIUM_KMS must be set to "openbao" — see docs/kms.md.');
   }
-  if (kind === 'openbao') {
-    cached = createOpenBao();
-  } else {
-    throw new Error(`APERIUM_KMS=${kind} is not a supported adapter. Only "openbao" is currently supported.`);
-  }
-  cached.kind = kind;
+  cached = createOpenBao();
+  cached.kind = 'openbao';
   return cached;
 }
 
@@ -99,6 +92,5 @@ async function resolveBootSecret(envName, defaultRef, opts = {}) {
 module.exports = {
   getSecretStore,
   looksLikeRef,
-  refAdapter,
   resolveBootSecret,
 };

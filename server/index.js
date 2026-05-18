@@ -628,7 +628,7 @@ wss.on('connection', (ws, req) => {
 const PORT = Number(process.env.PORT) || 8080;
 
 async function main() {
-  // 1. Bring up the KMS adapter and check it's reachable BEFORE doing
+  // 1. Bring up the KMS client and check it's reachable BEFORE doing
   //    anything that needs secrets. Fatal if unreachable — no plaintext
   //    fallback.
   let store;

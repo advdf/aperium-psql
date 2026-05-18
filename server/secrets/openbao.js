@@ -1,5 +1,5 @@
-// OpenBao (Vault KV v2-compatible) adapter for the SecretStore abstraction.
-// Uses Node 20 native `fetch` — no SDK dependency.
+// OpenBao (Vault KV v2-compatible) client. Talks to OpenBao over HTTP
+// using Node 20 native `fetch` — no SDK dependency.
 //
 // Config:
 //   OPENBAO_ADDR     base URL, e.g. http://openbao:8200

@@ -33,7 +33,7 @@ After the migration:
   production, swap this for a Docker secret mount or an external
   auth method (AppRole / OIDC / k8s SA).
 
-A "ref" is an opaque string of the shape `openbao:<adapter-path>`.
+A "ref" is an opaque string of the shape `openbao:<path>`.
 Examples:
 
 - `openbao:server/session-secret`
@@ -137,7 +137,7 @@ token off-host, then unseal three times. Enable KV v2:
 an AppRole, write its role-id + secret-id, and use those instead of
 the root token.
 
-The aperium adapter currently accepts only a static
+The aperium KMS client currently accepts only a static
 `OPENBAO_TOKEN`. If you want AppRole login, you can renew the token
 externally (e.g. a sidecar that calls
 `POST /v1/auth/approle/login` and writes the response token to a
@@ -202,14 +202,3 @@ When you upgrade from a pre-KMS version of aperium:
   them alone is insufficient.
 - **Auditing.** Every read/write is a normal HTTP call to OpenBao,
   which logs them. Enable the audit log for who-read-what trails.
-
----
-
-## A note on other adapters
-
-The `SecretStore` interface in `server/secrets/index.js` is
-deliberately small (`get` / `put` / `putAt` / `delete` /
-`healthcheck`). Plugging in a different KMS (Infisical, AWS Secrets
-Manager, Doppler, …) is roughly one new file under `server/secrets/`
-and a branch in the `getSecretStore()` switch. None ship today —
-PRs welcome.
