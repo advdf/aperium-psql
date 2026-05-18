@@ -8,6 +8,26 @@ const path = require('path');
 
 const { getSecretStore, looksLikeRef } = require('./index');
 
+// Reads a private-key file from the local FS for migration into the KMS.
+// Returns `null` if the file is missing / unreadable — callers treat that
+// as "leave the existing privateKeyPath alone, log a warning". This is the
+// same shape as server/index.js#readPrivateKey but non-throwing so a single
+// bad bastion entry doesn't abort the whole boot migration.
+function tryReadKeyFile(p, log) {
+  if (!p) return null;
+  try {
+    const content = fs.readFileSync(p, 'utf-8');
+    if (!content.trim()) {
+      log(`[migrate] key file ${p}: empty, skipping`);
+      return null;
+    }
+    return content;
+  } catch (err) {
+    log(`[migrate] key file ${p}: ${err.code || err.message}, skipping`);
+    return null;
+  }
+}
+
 function isUuidLikeDir(name) {
   // Per-user dirs are named after the postgres UUID PK of aperium.users.
   // Anything that doesn't look like a UUID is skipped (e.g. legacy `pg/`).
@@ -64,6 +84,8 @@ async function migrateBastionsFile(file, userId, store, log) {
   let strippedAnyEmpty = false;
   for (const b of list) {
     let touched = false;
+
+    // passphrase → passphraseRef
     if (typeof b.passphrase === 'string' && b.passphrase.length > 0) {
       try {
         const ref = await store.put(`bastions/${userId}/${b.id || 'unknown'}`, 'passphrase', b.passphrase);
@@ -78,6 +100,8 @@ async function migrateBastionsFile(file, userId, store, log) {
       delete b.passphrase;
       strippedAnyEmpty = true;
     }
+
+    // legacy inline privateKey → privateKeyRef
     if (typeof b.privateKey === 'string' && b.privateKey.length > 0) {
       try {
         const ref = await store.put(`bastions/${userId}/${b.id || 'unknown'}`, 'privateKey', b.privateKey);
@@ -92,6 +116,29 @@ async function migrateBastionsFile(file, userId, store, log) {
       delete b.privateKey;
       strippedAnyEmpty = true;
     }
+
+    // privateKeyPath → privateKeyRef (reads the file content into the KMS,
+    // then drops the path field). The file on the host stays put — the
+    // operator deletes it manually once they've confirmed the migration.
+    if (typeof b.privateKeyPath === 'string' && b.privateKeyPath.length > 0 && !looksLikeRef(b.privateKeyRef)) {
+      const content = tryReadKeyFile(b.privateKeyPath, log);
+      if (content) {
+        try {
+          const ref = await store.put(`bastions/${userId}/${b.id || 'unknown'}`, 'privateKey', content);
+          b.privateKeyRef = ref;
+          log(`[migrate] bastion ${b.id || '?'} privateKeyPath ${b.privateKeyPath} → KMS`);
+          delete b.privateKeyPath;
+          touched = true;
+        } catch (err) {
+          log(`[migrate] bastion ${b.id || '?'} privateKeyPath upload: ${err.message}`);
+          throw err;
+        }
+      }
+      // else: file unreadable — leave privateKeyPath untouched so the
+      // bastion still works against the legacy file-on-disk code path
+      // and the operator gets a chance to fix the mount.
+    }
+
     if (touched) migrated++; else skipped++;
   }
   if (migrated > 0 || strippedAnyEmpty) writeJson(file, list);
@@ -148,7 +195,7 @@ async function sanitizeConnectionForWrite(c, userId, store) {
   return out;
 }
 
-async function sanitizeBastionForWrite(b, userId, store) {
+async function sanitizeBastionForWrite(b, userId, store, log = () => {}) {
   const out = { ...b };
   if (typeof out.passphrase === 'string' && out.passphrase.length > 0 && !looksLikeRef(out.passphrase)) {
     out.passphraseRef = await store.put(`bastions/${userId}/${out.id || 'unknown'}`, 'passphrase', out.passphrase);
@@ -158,6 +205,19 @@ async function sanitizeBastionForWrite(b, userId, store) {
     out.privateKeyRef = await store.put(`bastions/${userId}/${out.id || 'unknown'}`, 'privateKey', out.privateKey);
   }
   delete out.privateKey;
+  // privateKeyPath → privateKeyRef: read the file content on save and
+  // push it to the KMS, then drop the path field so the bastion record
+  // ends up ref-only.
+  if (typeof out.privateKeyPath === 'string' && out.privateKeyPath.length > 0 && !looksLikeRef(out.privateKeyRef)) {
+    const content = tryReadKeyFile(out.privateKeyPath, log);
+    if (content) {
+      out.privateKeyRef = await store.put(`bastions/${userId}/${out.id || 'unknown'}`, 'privateKey', content);
+      log(`[secrets] bastion ${out.id || '?'} privateKeyPath ${out.privateKeyPath} → KMS`);
+      delete out.privateKeyPath;
+    }
+    // else: leave the path so the request still resolves at tunnel-open
+    // time; operator can fix the mount and re-save.
+  }
   return out;
 }
 

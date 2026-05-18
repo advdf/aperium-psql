@@ -7,9 +7,15 @@ services:
       - "8088:8080"
     volumes:
       - ./data:/data
-      # SSH private keys referenced by bastions by path (e.g. /keys/my-key).
-      # Mount whatever key dir you need; read-only is recommended.
+      # SSH private keys: optional staging area. The operator drops a key
+      # file here, picks it via the bastions UI; on save the SERVER reads
+      # the file content and pushes it to the KMS as `privateKeyRef`.
+      # The key file itself can then be deleted from the host. See
+      # docs/kms.md for the migration path from path-based bastions.
       - ./keys:/keys:ro
+      # Read-only mount of the openbao-state volume so we can resolve
+      # OPENBAO_TOKEN_FILE without ever putting the token in env vars.
+      - openbao-state:/openbao/state:ro
     environment:
       - APERIUM_DATA_DIR=/data
       - PORT=8080
@@ -31,7 +37,11 @@ services:
       - SESSION_SECRET=${SESSION_SECRET:-}
       - APERIUM_KMS=${APERIUM_KMS:-openbao}
       - OPENBAO_ADDR=${OPENBAO_ADDR:-http://openbao:8200}
-      - OPENBAO_TOKEN=${OPENBAO_TOKEN:-aperium-dev-root}
+      # The OpenBao container writes its dynamically-generated root token
+      # to /openbao/state/root-token on first boot. Aperium reads that
+      # path via OPENBAO_TOKEN_FILE rather than carrying the token in env
+      # (so `docker inspect aperium-psql` shows no token at all).
+      - OPENBAO_TOKEN_FILE=/openbao/state/root-token
       - OPENBAO_MOUNT=${OPENBAO_MOUNT:-secret}
       # Set to 'true' when serving over HTTPS so the session cookie is
       # marked Secure. Leave unset for plain-HTTP localhost dev.
@@ -99,8 +109,8 @@ services:
 
   # One-shot bootstrap: seeds the well-known boot-secret refs into OpenBao
   # before aperium starts. Idempotent — values that already exist are left
-  # alone. In production replace this with whatever your operator runbook
-  # uses (`bao kv put`, an init job, sealed-secrets, etc.).
+  # alone. Reads the dynamically-generated root token written by the
+  # openbao init script to the shared `openbao-state` volume.
   openbao-bootstrap:
     image: openbao/openbao:latest
     container_name: aperium-openbao-bootstrap
@@ -109,41 +119,50 @@ services:
         condition: service_healthy
     environment:
       - BAO_ADDR=http://openbao:8200
-      - BAO_TOKEN=aperium-dev-root
       - PG_PASSWORD_SEED=aperium
+    volumes:
+      - openbao-state:/openbao/state:ro
     entrypoint:
       - sh
       - -c
-      - 'if bao kv get -mount=secret aperium/server/pg-password > /dev/null 2>&1; then echo "[bootstrap] openbao:server/pg-password already present, skipping"; else bao kv put -mount=secret aperium/server/pg-password value="$$PG_PASSWORD_SEED" > /dev/null && echo "[bootstrap] seeded openbao:server/pg-password"; fi'
+      - 'export BAO_TOKEN=$$(cat /openbao/state/root-token); if bao kv get -mount=secret aperium/server/pg-password > /dev/null 2>&1; then echo "[bootstrap] openbao:server/pg-password already present, skipping"; else bao kv put -mount=secret aperium/server/pg-password value="$$PG_PASSWORD_SEED" > /dev/null && echo "[bootstrap] seeded openbao:server/pg-password"; fi'
     command: []
     networks:
       - internal
     restart: "no"
 
-  # OpenBao dev-mode sidecar. Ephemeral — restarting wipes all secrets.
-  # See docs/kms.md for the production setup (persistent storage, sealing,
-  # auth methods, secret rotation).
+  # OpenBao with persistent file storage and auto-init/unseal. The unseal
+  # key + root token live on the openbao-state volume — fine for a dev
+  # install, NOT for production (see docs/kms.md). The init.sh wrapper
+  # script handles first-boot init and every-boot unseal so the container
+  # survives `docker compose down/up` without manual intervention.
   openbao:
     image: openbao/openbao:latest
     container_name: aperium-openbao
-    command:
-      - server
-      - -dev
-      - -dev-root-token-id=aperium-dev-root
-      - -dev-listen-address=0.0.0.0:8200
+    entrypoint:
+      - /bin/sh
+      - /openbao/scripts/init.sh
     environment:
+      # The CLI talks to the local server over plain HTTP — used by the
+      # init script AND by the docker healthcheck below.
       - BAO_ADDR=http://127.0.0.1:8200
-      - BAO_TOKEN=aperium-dev-root
-    # Token is constant for dev. Production must use a real auth method and
-    # persistent storage — never `-dev`.
+    volumes:
+      - openbao-data:/openbao/data
+      - openbao-state:/openbao/state
+      - ./scripts/openbao/config.hcl:/openbao/config/config.hcl:ro
+      - ./scripts/openbao/init.sh:/openbao/scripts/init.sh:ro
     cap_add:
       - IPC_LOCK
     healthcheck:
-      test: ["CMD-SHELL", "bao status > /dev/null 2>&1 || exit 1"]
+      # Healthy only when initialized AND unsealed. `bao status` exits 0 on
+      # unsealed, 2 on sealed; we treat both 0 and "successfully parsed
+      # output" as proceeding, but the init script guarantees unseal on
+      # every boot, so `exit code 0` is the canonical green state.
+      test: ["CMD-SHELL", "bao status > /dev/null 2>&1"]
       interval: 5s
       timeout: 3s
-      retries: 12
-      start_period: 5s
+      retries: 24
+      start_period: 8s
     networks:
       - internal
     restart: unless-stopped
@@ -152,3 +171,12 @@ networks:
   public:
   internal:
     internal: true
+
+volumes:
+  # OpenBao file-storage backend. Survives `docker compose down`. Wipe
+  # with `docker volume rm aperium-psql_openbao-data` to start fresh.
+  openbao-data:
+  # Holds the init.json (unseal key + root token) and the
+  # /openbao/state/root-token file consumed by aperium and the
+  # bootstrap container. Same lifecycle as openbao-data.
+  openbao-state:

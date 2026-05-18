@@ -51,15 +51,18 @@ async function resolveBastionCreds(source, ctx) {
     throw new Error(`${ctx}: host and user are required`);
   }
   const store = getSecretStore();
-  const keyPath = source.privateKeyPath;
+  // Prefer the ref. The path is only honored as a transitional fallback
+  // for bastions whose migration hasn't run yet (e.g. key file was missing
+  // at migration time). Once migrated, privateKeyPath is dropped from
+  // bastions.json.
   let privateKey;
-  if (keyPath) {
-    privateKey = readPrivateKey(keyPath, `${ctx} (${source.host})`);
-  } else if (looksLikeRef(source.privateKeyRef)) {
+  if (looksLikeRef(source.privateKeyRef)) {
     try { privateKey = await store.get(source.privateKeyRef); }
     catch (err) { throw new Error(`${ctx} (${source.host}): privateKeyRef ${source.privateKeyRef.slice(0, 40)}…: ${err.message}`); }
+  } else if (source.privateKeyPath) {
+    privateKey = readPrivateKey(source.privateKeyPath, `${ctx} (${source.host})`);
   } else {
-    throw new Error(`${ctx} (${source.host}): privateKeyPath or privateKeyRef is required`);
+    throw new Error(`${ctx} (${source.host}): privateKeyRef or privateKeyPath is required`);
   }
   let passphrase;
   if (looksLikeRef(source.passphraseRef)) {
@@ -286,7 +289,7 @@ app.put('/api/bastions', async (req, res) => {
   try {
     const oldList = loadBastions(userId);
     const sanitized = [];
-    for (const b of req.body) sanitized.push(await sanitizeBastionForWrite(b, userId, store));
+    for (const b of req.body) sanitized.push(await sanitizeBastionForWrite(b, userId, store, log));
     fs.writeFileSync(file, JSON.stringify(sanitized, null, 2));
     await deleteOrphanedRefs(oldList, sanitized, ['passphraseRef', 'privateKeyRef'], store, log);
     res.json({ ok: true });

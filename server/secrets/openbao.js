@@ -2,9 +2,14 @@
 // using Node 20 native `fetch` — no SDK dependency.
 //
 // Config:
-//   OPENBAO_ADDR     base URL, e.g. http://openbao:8200
-//   OPENBAO_TOKEN    auth token (X-Vault-Token header)
-//   OPENBAO_MOUNT    KV v2 mount path (default "secret")
+//   OPENBAO_ADDR        base URL, e.g. http://openbao:8200
+//   OPENBAO_TOKEN_FILE  path to a file containing the auth token (preferred
+//                       — keeps the token out of env vars / docker inspect)
+//   OPENBAO_TOKEN       auth token as a literal env var (fallback)
+//   OPENBAO_MOUNT       KV v2 mount path (default "secret")
+//
+// The token is re-read from the file on every request, so rotating it on
+// disk is picked up without a server restart.
 //
 // Storage layout: every aperium secret lives under `<mount>/aperium/...`,
 // so a single shared mount can be used alongside other tenants.
@@ -15,8 +20,10 @@
 //   openbao:server/pg-password
 //   openbao:connections/<userId>/<uuid>
 //   openbao:bastions/<userId>/<uuid>/passphrase
+//   openbao:bastions/<userId>/<uuid>/privateKey
 
 const { randomUUID } = require('crypto');
+const fs = require('fs');
 
 function trimSlashes(s) { return String(s || '').replace(/^\/+|\/+$/g, ''); }
 
@@ -26,11 +33,27 @@ class NotFoundError extends Error {
 
 function createOpenBao() {
   const addr = trimSlashes(process.env.OPENBAO_ADDR || '');
-  const token = process.env.OPENBAO_TOKEN || '';
+  const tokenFile = process.env.OPENBAO_TOKEN_FILE || '';
+  const literalToken = process.env.OPENBAO_TOKEN || '';
   const mount = trimSlashes(process.env.OPENBAO_MOUNT || 'secret');
   if (!addr) throw new Error('OPENBAO_ADDR is required when APERIUM_KMS=openbao.');
-  if (!token) throw new Error('OPENBAO_TOKEN is required when APERIUM_KMS=openbao.');
+  if (!tokenFile && !literalToken) {
+    throw new Error('OPENBAO_TOKEN_FILE or OPENBAO_TOKEN is required when APERIUM_KMS=openbao.');
+  }
   const prefix = 'aperium';
+
+  function readToken() {
+    if (tokenFile) {
+      try {
+        const value = fs.readFileSync(tokenFile, 'utf-8').trim();
+        if (!value) throw new Error('empty file');
+        return value;
+      } catch (err) {
+        throw new Error(`OPENBAO_TOKEN_FILE ${tokenFile} unreadable: ${err.message}`);
+      }
+    }
+    return literalToken;
+  }
 
   const refToRelpath = (ref) => {
     if (typeof ref !== 'string' || !ref.startsWith('openbao:')) {
@@ -46,7 +69,7 @@ function createOpenBao() {
   };
 
   const headers = () => ({
-    'X-Vault-Token': token,
+    'X-Vault-Token': readToken(),
     'Content-Type': 'application/json',
     Accept: 'application/json',
   });
