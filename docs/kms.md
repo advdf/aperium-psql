@@ -204,12 +204,22 @@ When you upgrade from a pre-KMS version of aperium:
   idempotent. The next time the server reads the ref (next query
   spawn, next session validation), the new value takes effect.
   Active queries keep using the cached env they spawned with.
-- **Backup.** The aperium JSON/YAML backup
-  (sidebar → "Backup / restore") now contains only refs. Keep it as
-  part of your normal backup — but remember the file is **useless
-  without the KMS**.
-  Back up the KMS itself separately: snapshot the OpenBao storage
-  volume (`/openbao/file`) and the unseal keys.
+- **Backup.** The aperium JSON/YAML backup (sidebar → "Backup /
+  restore") is now a **real, restorable backup**. The server resolves
+  every `*Ref` against the KMS, packs the cleartext payload, and
+  encrypts it with AES-256-GCM using a key derived from the
+  passphrase you provide (scrypt, N=2¹⁵, r=8, p=1). Anyone with the
+  passphrase can read every secret — store it like you'd store any
+  master credential (password manager, off-host). Lose the
+  passphrase and the dump is unrecoverable.
+  Importing a v2 dump on another aperium install: the server
+  decrypts, re-pushes every secret to **that** install's KMS, and
+  merges the resulting refs by id. No coordination between the
+  source and destination KMS is required — the encrypted file is the
+  contract.
+  Legacy v1 dumps (refs only, no encryption) are still accepted on
+  import; they restore the connection / bastion shells but the
+  secrets stay broken unless the original KMS is reachable.
 - **Disaster recovery.** Restoring requires three things, in order:
   (1) the KMS data (including unseal/admin tokens), (2) the
   aperium data volume (`data/`), and (3) the aperium image. Any of

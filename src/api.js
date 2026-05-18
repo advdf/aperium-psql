@@ -307,6 +307,29 @@
         body: JSON.stringify(bastions),
       }).then((r) => r.json()),
 
+    // Encrypted backup export / import. The export endpoint resolves every
+    // `*Ref` against the KMS and returns an AES-256-GCM envelope; the
+    // import endpoint decrypts, re-pushes each secret to the local KMS,
+    // and merges into the on-disk JSON by id.
+    exportBackup: async (passphrase) => {
+      const res = await fetch('/api/backup/export', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ passphrase }),
+      });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `HTTP ${res.status}`);
+      return res.json();
+    },
+    importBackup: async (envelope, passphrase) => {
+      const res = await fetch('/api/backup/import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ envelope, passphrase }),
+      });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `HTTP ${res.status}`);
+      return res.json();
+    },
+
     listKeys: () => fetch('/api/keys').then((r) => r.json()),
 
     loadPsqlMeta: () => fetch('/api/psql-meta').then((r) => r.json()).catch(() => []),

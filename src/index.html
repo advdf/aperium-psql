@@ -181,12 +181,17 @@
   <dialog id="backup-dialog" class="backup-dialog">
     <h3>Backup &amp; restore</h3>
     <p class="backup-warning">
-      <strong>Heads up:</strong> the export contains <em>references</em> to your secrets in the configured KMS (OpenBao) — never the plaintext. The file is safe to keep but <strong>useless without the matching KMS</strong>: importing it on a different instance will not restore connectivity unless the same KMS, paths, and ACLs are available.
+      <strong>Heads up:</strong> the export bundles every Postgres password, SSH passphrase, and SSH private key into an <strong>AES-256-GCM encrypted</strong> file you can restore on a different aperium install. Anyone with the passphrase can read every secret — store it somewhere safe (password manager). Lose it and the dump is unrecoverable.
     </p>
+
+    <label class="backup-passphrase">
+      Passphrase (≥ 8 chars)
+      <input type="password" id="backup-passphrase" autocomplete="off" placeholder="passphrase for this export / import">
+    </label>
 
     <section class="backup-section">
       <h4>Export</h4>
-      <p class="backup-hint">Downloads every connection and bastion as a single file.</p>
+      <p class="backup-hint">Resolves every secret from the KMS, encrypts the payload with the passphrase above, downloads a single file.</p>
       <div class="backup-buttons">
         <button type="button" id="btn-backup-export-json" class="tunnel-add-btn">Download JSON</button>
         <button type="button" id="btn-backup-export-yaml" class="tunnel-add-btn">Download YAML</button>
@@ -196,7 +201,7 @@
     <section class="backup-section">
       <h4>Import</h4>
       <p class="backup-hint">
-        Accepts the same JSON or YAML format. Items with an <code>id</code> that already exists are overwritten; new ones are added. Existing items not in the file are kept.
+        Pick an encrypted backup file (.json/.yaml). The server decrypts with the passphrase above, re-pushes every secret into this instance's KMS, and merges into your existing connections + bastions by id. Legacy (refs-only) v1 dumps are still accepted — they restore the shells without secrets.
       </p>
       <div class="backup-buttons">
         <button type="button" id="btn-import-backup" class="tunnel-add-btn">Choose file…</button>

@@ -2442,7 +2442,7 @@ btnBastionDelete.addEventListener('click', async () => {
   backToList();
 });
 
-// ---- Backup / restore (connections + bastions, JSON or YAML) ----
+// ---- Backup / restore (encrypted, server-side) ----
 const backupDialog = document.getElementById('backup-dialog');
 const btnBackup = document.getElementById('btn-backup');
 const btnBackupExportJson = document.getElementById('btn-backup-export-json');
@@ -2450,19 +2450,7 @@ const btnBackupExportYaml = document.getElementById('btn-backup-export-yaml');
 const btnImportBackup = document.getElementById('btn-import-backup');
 const btnBackupClose = document.getElementById('btn-backup-close');
 const backupImportStatus = document.getElementById('backup-import-status');
-
-async function gatherBackupPayload() {
-  const [conns, basts] = await Promise.all([
-    window.api.listConnections(),
-    window.api.listBastions(),
-  ]);
-  return {
-    version: 1,
-    exportedAt: new Date().toISOString(),
-    connections: conns,
-    bastions: basts,
-  };
-}
+const backupPassphraseEl = document.getElementById('backup-passphrase');
 
 function triggerDownload(content, filename, mime) {
   const blob = new Blob([content], { type: mime });
@@ -2476,37 +2464,54 @@ function triggerDownload(content, filename, mime) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-function mergeById(current, incoming) {
-  const byId = new Map(current.map((x) => [x.id, x]));
-  for (const item of incoming) {
-    const copy = { ...item };
-    if (!copy.id) copy.id = crypto.randomUUID();
-    byId.set(copy.id, copy);
+function setBackupStatus(kind, text) {
+  backupImportStatus.textContent = text;
+  backupImportStatus.style.color = kind === 'error' ? 'var(--red)'
+    : kind === 'ok' ? 'var(--green)'
+    : 'var(--text-dim)';
+}
+
+function readPassphrase() {
+  const v = backupPassphraseEl.value || '';
+  if (v.length < 8) {
+    setBackupStatus('error', 'Passphrase must be at least 8 characters.');
+    backupPassphraseEl.focus();
+    return null;
   }
-  return Array.from(byId.values());
+  return v;
 }
 
 btnBackup.addEventListener('click', () => {
-  backupImportStatus.textContent = '';
+  backupPassphraseEl.value = '';
+  setBackupStatus('idle', '');
   backupDialog.showModal();
 });
 
 btnBackupClose.addEventListener('click', () => backupDialog.close());
 
-btnBackupExportJson.addEventListener('click', async () => {
-  const payload = await gatherBackupPayload();
-  const name = `aperium-backup-${new Date().toISOString().slice(0, 10)}.json`;
-  triggerDownload(JSON.stringify(payload, null, 2), name, 'application/json');
-});
+async function doExport(asYaml) {
+  const passphrase = readPassphrase();
+  if (!passphrase) return;
+  setBackupStatus('idle', 'Encrypting…');
+  try {
+    const envelope = await window.api.exportBackup(passphrase);
+    const stamp = new Date().toISOString().slice(0, 10);
+    if (asYaml) {
+      const text = yaml.dump(envelope, { lineWidth: -1, noRefs: true, quotingType: '"' });
+      triggerDownload(text, `aperium-backup-${stamp}.yaml`, 'application/x-yaml');
+    } else {
+      triggerDownload(JSON.stringify(envelope, null, 2), `aperium-backup-${stamp}.json`, 'application/json');
+    }
+    setBackupStatus('ok', `Exported ${envelope.summary.connections} connection(s) and ${envelope.summary.bastions} bastion(s) — encrypted.`);
+  } catch (err) {
+    setBackupStatus('error', `Export failed: ${err.message}`);
+  }
+}
 
-btnBackupExportYaml.addEventListener('click', async () => {
-  const payload = await gatherBackupPayload();
-  const name = `aperium-backup-${new Date().toISOString().slice(0, 10)}.yaml`;
-  const text = yaml.dump(payload, { lineWidth: -1, noRefs: true, quotingType: '"' });
-  triggerDownload(text, name, 'application/x-yaml');
-});
+btnBackupExportJson.addEventListener('click', () => doExport(false));
+btnBackupExportYaml.addEventListener('click', () => doExport(true));
 
-btnImportBackup.addEventListener('click', async () => {
+btnImportBackup.addEventListener('click', () => {
   const input = document.createElement('input');
   input.type = 'file';
   input.accept = '.json,.yaml,.yml,application/json,application/x-yaml,text/yaml';
@@ -2515,38 +2520,34 @@ btnImportBackup.addEventListener('click', async () => {
     if (!file) return;
     try {
       const text = await file.text();
-      let parsed;
+      let envelope;
       const ext = file.name.toLowerCase().split('.').pop();
       if (ext === 'yaml' || ext === 'yml') {
-        parsed = yaml.load(text);
+        envelope = yaml.load(text);
       } else {
-        try { parsed = JSON.parse(text); }
-        catch { parsed = yaml.load(text); }
+        try { envelope = JSON.parse(text); }
+        catch { envelope = yaml.load(text); }
       }
-      if (!parsed || typeof parsed !== 'object') throw new Error('Backup file has no usable root object.');
-      const importedConns = Array.isArray(parsed.connections) ? parsed.connections : [];
-      const importedBasts = Array.isArray(parsed.bastions) ? parsed.bastions : [];
-      if (importedConns.length === 0 && importedBasts.length === 0) {
-        throw new Error('No connections or bastions found in the file.');
+      if (!envelope || typeof envelope !== 'object') throw new Error('Backup file has no usable root object.');
+
+      let passphrase = '';
+      if (envelope.encrypted === true) {
+        passphrase = readPassphrase();
+        if (!passphrase) return;
       }
-      const [currConns, currBasts] = await Promise.all([
+      setBackupStatus('idle', envelope.encrypted ? 'Decrypting…' : 'Importing legacy v1 dump (no secrets)…');
+      const result = await window.api.importBackup(envelope, passphrase);
+      // Refresh local caches so the UI reflects the new state.
+      const [conns, basts] = await Promise.all([
         window.api.listConnections(),
         window.api.listBastions(),
       ]);
-      const mergedConns = mergeById(currConns, importedConns);
-      const mergedBasts = mergeById(currBasts, importedBasts);
-      await Promise.all([
-        window.api.saveConnections(mergedConns),
-        window.api.saveBastions(mergedBasts),
-      ]);
-      connections = mergedConns;
-      bastionsCache = mergedBasts;
+      connections = conns;
+      bastionsCache = basts;
       renderConnections();
-      backupImportStatus.textContent = `Imported ${importedConns.length} connection(s) and ${importedBasts.length} bastion(s).`;
-      backupImportStatus.style.color = 'var(--green)';
+      setBackupStatus('ok', `Imported ${result.importedConnections} connection(s) and ${result.importedBastions} bastion(s). Totals: ${result.totalConnections} / ${result.totalBastions}.`);
     } catch (err) {
-      backupImportStatus.textContent = `Import failed: ${err.message}`;
-      backupImportStatus.style.color = 'var(--red)';
+      setBackupStatus('error', `Import failed: ${err.message}`);
     }
   });
   input.click();
