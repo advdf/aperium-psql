@@ -2317,16 +2317,32 @@ function buildKeySelect(currentPath) {
 }
 
 function renderBastionDetailForm(b) {
-  const hasLegacyInlineKey = !b.privateKeyPath && !!b.privateKey;
+  const hasRef = typeof b.privateKeyRef === 'string' && b.privateKeyRef.startsWith('openbao:');
+  const hasLegacyInlineKey = !b.privateKeyPath && !hasRef && !!b.privateKey;
+  let currentLabel;
+  if (hasRef) currentLabel = 'stored in the KMS';
+  else if (b.privateKeyPath) currentLabel = b.privateKeyPath;
+  else if (hasLegacyInlineKey) currentLabel = 'inline (legacy — replace by uploading or picking a file)';
+  else currentLabel = '— none —';
+
   bastionDetailForm.innerHTML = `
     <div class="bastion-detail-fields">
       <label>Name <input type="text" data-field="name" placeholder="e.g. Prod bastion"></label>
       <label>Host <input type="text" data-field="host" placeholder="bastion.example.com"></label>
       <label>Port <input type="number" data-field="port" value="22"></label>
       <label>User <input type="text" data-field="user" placeholder="jump"></label>
-      <label class="bastion-key-label">Private key file</label>
-      <p class="bastion-key-hint">Files in <code class="keys-dir"></code> on the server. Drop your SSH key into the mounted volume, then pick it from the list (public-key files and hidden files are excluded).</p>
-      ${hasLegacyInlineKey ? '<p class="bastion-key-legacy">⚠ This bastion still stores the private key inline (legacy). Save its content to a mounted file and pick it above; leaving the selection empty keeps the legacy inline key working.</p>' : ''}
+
+      <div class="bastion-key-block">
+        <span class="bastion-key-label">Private key</span>
+        <p class="bastion-key-current">Currently: <strong class="bastion-key-current-value"></strong></p>
+        <p class="bastion-key-hint">Pick a file already on the server (<code class="keys-dir"></code>), <strong>or upload one from your machine</strong>. The chosen key's content is encrypted into the KMS on save — the file itself does not need to stay on disk.</p>
+        <div class="bastion-key-picker"></div>
+        <div class="bastion-key-upload">
+          <button type="button" class="bastion-key-upload-btn">Upload key from disk…</button>
+          <span class="bastion-key-upload-status"></span>
+        </div>
+      </div>
+
       <label>Passphrase (optional)
         <input type="password" data-field="passphrase" autocomplete="new-password">
       </label>
@@ -2338,10 +2354,60 @@ function renderBastionDetailForm(b) {
   bastionDetailForm.querySelector('[data-field=user]').value = b.user || '';
   bastionDetailForm.querySelector('[data-field=passphrase]').value = b.passphrase || '';
   bastionDetailForm.querySelector('.keys-dir').textContent = keysCache.dir;
-  const label = bastionDetailForm.querySelector('.bastion-key-label');
-  label.appendChild(buildKeySelect(b.privateKeyPath || ''));
+  bastionDetailForm.querySelector('.bastion-key-current-value').textContent = currentLabel;
+  bastionDetailForm.querySelector('.bastion-key-picker').appendChild(buildKeySelect(b.privateKeyPath || ''));
+
+  // State for the upload buffer (cleartext key body the user picked from
+  // their own disk). Cleared every time the form is re-rendered.
   bastionDetailForm.dataset.legacyKey = b.privateKey || '';
   bastionDetailForm.dataset.id = b.id;
+  bastionDetailForm.dataset.hasRef = String(hasRef);
+  bastionDetailForm.dataset.uploadedKey = '';
+  bastionDetailForm.dataset.uploadedName = '';
+
+  // Upload from disk: read a local file as text and stash on the form so
+  // it ships with the next Save. Picking a path from the dropdown clears
+  // the uploaded buffer, and vice-versa — the two sources are exclusive.
+  const uploadBtn = bastionDetailForm.querySelector('.bastion-key-upload-btn');
+  const uploadStatus = bastionDetailForm.querySelector('.bastion-key-upload-status');
+  uploadBtn.addEventListener('click', () => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '*/*';
+    input.addEventListener('change', async () => {
+      const file = input.files && input.files[0];
+      if (!file) return;
+      try {
+        const text = await file.text();
+        if (!text || !text.trim()) {
+          uploadStatus.textContent = `${file.name} is empty`;
+          uploadStatus.className = 'bastion-key-upload-status status-error';
+          return;
+        }
+        bastionDetailForm.dataset.uploadedKey = text;
+        bastionDetailForm.dataset.uploadedName = file.name;
+        uploadStatus.textContent = `✓ ${file.name} (${text.length} chars) ready — saves to the KMS on submit`;
+        uploadStatus.className = 'bastion-key-upload-status status-ok';
+        // Reset the server-side picker so the two paths can't both be live.
+        const sel = bastionDetailForm.querySelector('[data-field=privateKeyPath]');
+        if (sel) sel.value = '';
+      } catch (err) {
+        uploadStatus.textContent = `Read failed: ${err.message}`;
+        uploadStatus.className = 'bastion-key-upload-status status-error';
+      }
+    });
+    input.click();
+  });
+  const sel = bastionDetailForm.querySelector('[data-field=privateKeyPath]');
+  sel?.addEventListener('change', () => {
+    if (sel.value && bastionDetailForm.dataset.uploadedKey) {
+      bastionDetailForm.dataset.uploadedKey = '';
+      bastionDetailForm.dataset.uploadedName = '';
+      uploadStatus.textContent = '';
+      uploadStatus.className = 'bastion-key-upload-status';
+    }
+  });
+
   bastionDetailForm.querySelector('[data-field=name]').focus();
 }
 
@@ -2352,11 +2418,27 @@ function readBastionDetailForm() {
     host: bastionDetailForm.querySelector('[data-field=host]').value.trim(),
     port: bastionDetailForm.querySelector('[data-field=port]').value.trim() || '22',
     user: bastionDetailForm.querySelector('[data-field=user]').value.trim(),
-    privateKeyPath: bastionDetailForm.querySelector('[data-field=privateKeyPath]').value.trim(),
     passphrase: bastionDetailForm.querySelector('[data-field=passphrase]').value,
   };
-  const legacy = bastionDetailForm.dataset.legacyKey;
-  if (!b.privateKeyPath && legacy) b.privateKey = legacy;
+  // Priority for the private key source on save:
+  //   1. A key uploaded from the operator's disk wins — fresh content,
+  //      ships as `privateKey` for the server to push into the KMS.
+  //   2. Otherwise a path picked from the /keys dropdown — server reads
+  //      and pushes the file content.
+  //   3. Otherwise a legacy inline key carried on the bastion record.
+  //   4. Otherwise: no key source on the payload. The server keeps any
+  //      existing `privateKeyRef` untouched (the original is in the cache
+  //      and gets re-sent via the merge in btnBastionSave).
+  const uploaded = bastionDetailForm.dataset.uploadedKey || '';
+  const path = bastionDetailForm.querySelector('[data-field=privateKeyPath]')?.value.trim() || '';
+  const legacy = bastionDetailForm.dataset.legacyKey || '';
+  if (uploaded) {
+    b.privateKey = uploaded;
+  } else if (path) {
+    b.privateKeyPath = path;
+  } else if (legacy) {
+    b.privateKey = legacy;
+  }
   return b;
 }
 
@@ -2415,8 +2497,18 @@ btnBastionSave.addEventListener('click', async () => {
   const b = readBastionDetailForm();
   if (!b.name) { alert('Name is required.'); return; }
   if (!b.host || !b.user) { alert('Host and user are required.'); return; }
-  if (!b.privateKeyPath && !b.privateKey) {
-    alert('Pick a private key file from the list. Drop the file into the mounted keys directory if it isn\u2019t there yet.');
+
+  // Carry over an existing privateKeyRef when the form didn't supply a
+  // fresh key source (path / uploaded buffer / legacy inline). Without
+  // this, re-saving a migrated bastion without touching the key would
+  // wipe its ref.
+  const existing = bastionsCache.find((x) => x.id === b.id);
+  if (!b.privateKey && !b.privateKeyPath && existing && typeof existing.privateKeyRef === 'string') {
+    b.privateKeyRef = existing.privateKeyRef;
+  }
+
+  if (!b.privateKey && !b.privateKeyPath && !b.privateKeyRef) {
+    alert('A private key is required. Upload one from your machine, pick a file from the keys directory, or drop a file in there first.');
     return;
   }
   const isNew = bastionDetailForm.dataset.isNew === 'true';
