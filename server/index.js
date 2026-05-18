@@ -25,6 +25,12 @@ const {
   sanitizeBastionForWrite,
   deleteOrphanedRefs,
 } = require('./secrets/migrate');
+const {
+  assembleBackupPayload,
+  encryptBackup,
+  decryptBackup,
+  applyImportPayload,
+} = require('./secrets/backup');
 
 function loadBastions(userId) {
   const file = userDataPath(userId, 'bastions.json');
@@ -296,6 +302,54 @@ app.put('/api/bastions', async (req, res) => {
   } catch (err) {
     log('PUT /api/bastions error:', err.message);
     res.status(500).json({ error: `Failed to save bastions: ${err.message}` });
+  }
+});
+
+// Encrypted backup: resolves every *Ref to its cleartext in the KMS,
+// encrypts the resulting payload with the operator's passphrase, returns
+// the envelope. The client downloads it as JSON or YAML.
+app.post('/api/backup/export', async (req, res) => {
+  const { passphrase } = req.body || {};
+  if (typeof passphrase !== 'string' || passphrase.length < 8) {
+    return res.status(400).json({ error: 'passphrase must be a string of at least 8 characters' });
+  }
+  try {
+    const payload = await assembleBackupPayload(req.session.userId);
+    const envelope = encryptBackup(payload, passphrase);
+    res.json(envelope);
+  } catch (err) {
+    log('POST /api/backup/export error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Decrypts an envelope with the operator's passphrase, then re-pushes each
+// secret into THIS instance's KMS and merges the resulting refs into
+// connections.json / bastions.json by id.
+app.post('/api/backup/import', async (req, res) => {
+  const { envelope, passphrase } = req.body || {};
+  if (!envelope || typeof envelope !== 'object') {
+    return res.status(400).json({ error: 'envelope is required' });
+  }
+  if (envelope.encrypted === true && (typeof passphrase !== 'string' || passphrase.length === 0)) {
+    return res.status(400).json({ error: 'passphrase is required for encrypted backups' });
+  }
+  try {
+    let payload;
+    if (envelope.encrypted === true) {
+      payload = decryptBackup(envelope, passphrase);
+    } else {
+      // Legacy v1 envelope (`{ version: 1, connections, bastions }`) — refs
+      // only, no secrets to re-push. Save as-is; the operator gets the
+      // shells but will have to retype passwords. Same behavior as the old
+      // client-side merge.
+      payload = envelope;
+    }
+    const counts = await applyImportPayload(req.session.userId, payload, log);
+    res.json({ ok: true, ...counts });
+  } catch (err) {
+    log('POST /api/backup/import error:', err.message);
+    res.status(400).json({ error: err.message });
   }
 });
 
