@@ -237,6 +237,66 @@
         body: JSON.stringify(snippets),
       }).then((r) => r.json()),
 
+    importSnippets: async () => {
+      const file = await pickFile('.json,.yaml,.yml,application/json,application/x-yaml,text/yaml');
+      if (!file) return { canceled: true };
+      const text = await file.text();
+      const ext = file.name.toLowerCase().split('.').pop();
+      let parsed;
+      try {
+        if (ext === 'yaml' || ext === 'yml') {
+          if (!window._yaml) return { error: 'YAML support is not loaded yet — try again in a moment.' };
+          parsed = window._yaml.load(text);
+        } else {
+          try { parsed = JSON.parse(text); }
+          catch (jsonErr) {
+            if (!window._yaml) return { error: `Failed to parse JSON: ${jsonErr.message}` };
+            try { parsed = window._yaml.load(text); }
+            catch { return { error: `Failed to parse file as JSON or YAML: ${jsonErr.message}` }; }
+          }
+        }
+      } catch (err) {
+        return { error: `Failed to parse file: ${err.message}` };
+      }
+      if (!Array.isArray(parsed)) {
+        return { error: 'Expected a JSON/YAML array of categories at the root.' };
+      }
+      const normalized = [];
+      for (let i = 0; i < parsed.length; i++) {
+        const cat = parsed[i];
+        if (!cat || typeof cat !== 'object') {
+          return { error: `Category #${i + 1} is not an object.` };
+        }
+        if (typeof cat.category !== 'string' || !cat.category.trim()) {
+          return { error: `Category #${i + 1} is missing a "category" string.` };
+        }
+        if (!Array.isArray(cat.queries)) {
+          return { error: `Category "${cat.category}" is missing a "queries" array.` };
+        }
+        const queries = [];
+        for (let j = 0; j < cat.queries.length; j++) {
+          const q = cat.queries[j];
+          if (!q || typeof q !== 'object') {
+            return { error: `Query #${j + 1} in "${cat.category}" is not an object.` };
+          }
+          if (typeof q.name !== 'string' || !q.name.trim()) {
+            return { error: `Query #${j + 1} in "${cat.category}" is missing a "name" string.` };
+          }
+          if (typeof q.sql !== 'string') {
+            return { error: `Query "${q.name}" in "${cat.category}" is missing a "sql" string.` };
+          }
+          queries.push({
+            name: q.name,
+            desc: typeof q.desc === 'string' ? q.desc : '',
+            sql: q.sql,
+          });
+        }
+        normalized.push({ category: cat.category, queries });
+      }
+      const count = normalized.reduce((acc, c) => acc + c.queries.length, 0);
+      return { snippets: normalized, count, categories: normalized.length };
+    },
+
     getSnippetsPath: () => Promise.resolve('(server) snippets.json'),
 
     listBastions: () => fetch('/api/bastions').then((r) => r.json()),

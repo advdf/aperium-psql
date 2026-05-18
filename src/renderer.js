@@ -1,6 +1,10 @@
 import { createEditor, updateSchema } from './editor.js';
 import yaml from 'js-yaml';
 
+// Expose js-yaml for api.js (loaded before this bundle) so importers in the
+// shim can parse YAML files without re-bundling.
+window._yaml = yaml;
+
 // xterm loaded via <script> tags before this bundle
 const XTerminal = window._Terminal;
 const XFitAddon = window._FitAddon.FitAddon;
@@ -997,6 +1001,135 @@ async function loadSnippetsFromFile() {
   buildSnippetsMenu();
 }
 
+// Pure helper: combine `existing` and `imported` snippet trees per the chosen
+// strategy. Each side is `[{ category, queries: [{ name, desc, sql }] }]`.
+function mergeSnippets(existing, imported, strategy) {
+  const exist = Array.isArray(existing) ? existing : [];
+  const incoming = Array.isArray(imported) ? imported : [];
+  if (strategy === 'replace') {
+    return incoming.map((cat) => ({
+      category: cat.category,
+      queries: cat.queries.map((q) => ({ ...q })),
+    }));
+  }
+  if (strategy === 'append') {
+    return [
+      ...exist.map((cat) => ({ category: cat.category, queries: cat.queries.map((q) => ({ ...q })) })),
+      ...incoming.map((cat) => ({ category: cat.category, queries: cat.queries.map((q) => ({ ...q })) })),
+    ];
+  }
+  // 'merge' (by category + name): for each imported category, find existing
+  // by category name and merge query-by-query (replace same-name, append rest).
+  // Imported categories with no existing match are appended at the end.
+  const result = exist.map((cat) => ({
+    category: cat.category,
+    queries: cat.queries.map((q) => ({ ...q })),
+  }));
+  const byCat = new Map(result.map((c, idx) => [c.category, idx]));
+  for (const cat of incoming) {
+    if (byCat.has(cat.category)) {
+      const target = result[byCat.get(cat.category)];
+      const byName = new Map(target.queries.map((q, idx) => [q.name, idx]));
+      for (const q of cat.queries) {
+        const copy = { name: q.name, desc: q.desc || '', sql: q.sql };
+        if (byName.has(q.name)) {
+          target.queries[byName.get(q.name)] = copy;
+        } else {
+          byName.set(q.name, target.queries.length);
+          target.queries.push(copy);
+        }
+      }
+    } else {
+      const copy = {
+        category: cat.category,
+        queries: cat.queries.map((q) => ({ name: q.name, desc: q.desc || '', sql: q.sql })),
+      };
+      byCat.set(cat.category, result.length);
+      result.push(copy);
+    }
+  }
+  return result;
+}
+
+// Modal: pick a merge strategy. Resolves to 'replace' | 'merge' | 'append' or null.
+function askSnippetsImportStrategy(info) {
+  const dlg = document.getElementById('snippets-import-dialog');
+  const infoEl = document.getElementById('snippets-import-info');
+  const statusEl = document.getElementById('snippets-import-status');
+  const btnOk = document.getElementById('btn-snippets-import-ok');
+  const btnCancel = document.getElementById('btn-snippets-import-cancel');
+  infoEl.textContent = info || '';
+  statusEl.textContent = '';
+  statusEl.className = 'snippets-import-status';
+  // Default radio = merge.
+  for (const r of dlg.querySelectorAll('input[name="snippet-strategy"]')) {
+    r.checked = r.value === 'merge';
+  }
+  return new Promise((resolve) => {
+    const cleanup = () => {
+      btnOk.removeEventListener('click', onOk);
+      btnCancel.removeEventListener('click', onCancel);
+      dlg.removeEventListener('close', onClose);
+      dlg.removeEventListener('cancel', onCancelEvt);
+    };
+    const pick = () => {
+      const sel = dlg.querySelector('input[name="snippet-strategy"]:checked');
+      return sel ? sel.value : null;
+    };
+    const onOk = () => { const v = pick(); cleanup(); dlg.close('ok'); resolve(v); };
+    const onCancel = () => { cleanup(); dlg.close('cancel'); resolve(null); };
+    const onClose = () => { cleanup(); resolve(null); };
+    const onCancelEvt = (e) => { e.preventDefault(); onCancel(); };
+    btnOk.addEventListener('click', onOk);
+    btnCancel.addEventListener('click', onCancel);
+    dlg.addEventListener('close', onClose, { once: true });
+    dlg.addEventListener('cancel', onCancelEvt);
+    dlg.showModal();
+    requestAnimationFrame(() => btnCancel.focus());
+  });
+}
+
+async function runSnippetsImport() {
+  const result = await window.api.importSnippets();
+  if (result.canceled) return;
+  if (result.error) {
+    showSnippetsToast('error', result.error);
+    return;
+  }
+  const info = `${result.count} quer${result.count === 1 ? 'y' : 'ies'} across ${result.categories} categor${result.categories === 1 ? 'y' : 'ies'} parsed. Choose how to merge:`;
+  const strategy = await askSnippetsImportStrategy(info);
+  if (!strategy) return;
+  try {
+    const merged = mergeSnippets(activeSnippets || BUILTIN_SNIPPETS, result.snippets, strategy);
+    await window.api.saveSnippets(merged);
+    await loadSnippetsFromFile();
+    const total = merged.reduce((acc, c) => acc + c.queries.length, 0);
+    showSnippetsToast('ok', `Imported ${result.count} quer${result.count === 1 ? 'y' : 'ies'}. ${total} total in menu.`);
+  } catch (err) {
+    showSnippetsToast('error', `Failed to save: ${err.message}`);
+  }
+}
+
+// Minimal floating toast for snippet-import status, since the import flow is
+// not bound to a single <dialog> (the file picker is native, the strategy
+// dialog auto-closes). Reuses the dialog-toast colors.
+let snippetsToastTimer = null;
+function showSnippetsToast(kind, text) {
+  let el = document.getElementById('snippets-floating-toast');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'snippets-floating-toast';
+    el.className = 'snippets-floating-toast hidden';
+    document.body.appendChild(el);
+  }
+  el.className = `snippets-floating-toast snippets-floating-toast-${kind}`;
+  el.textContent = text;
+  if (snippetsToastTimer) clearTimeout(snippetsToastTimer);
+  snippetsToastTimer = setTimeout(() => {
+    el.className = 'snippets-floating-toast hidden';
+  }, 4500);
+}
+
 function buildSnippetsMenu() {
   snippetsMenu.innerHTML = '';
 
@@ -1037,6 +1170,15 @@ function buildSnippetsMenu() {
     }
   });
   snippetsMenu.appendChild(editItem);
+
+  const importItem = document.createElement('div');
+  importItem.className = 'snippet-item snippet-edit-btn';
+  importItem.innerHTML = `<span class="snippet-name">Import snippets...</span><span class="snippet-desc">Load a .json / .yaml file and choose how to merge</span>`;
+  importItem.addEventListener('click', async () => {
+    snippetsMenu.classList.add('hidden');
+    await runSnippetsImport();
+  });
+  snippetsMenu.appendChild(importItem);
 
   const reloadItem = document.createElement('div');
   reloadItem.className = 'snippet-item';

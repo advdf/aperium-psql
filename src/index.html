@@ -233,6 +233,41 @@
     </section>
   </dialog>
 
+  <!-- Snippets import strategy dialog -->
+  <dialog id="snippets-import-dialog" class="snippets-import-dialog">
+    <h3>Import snippets</h3>
+    <p id="snippets-import-info" class="snippets-import-info"></p>
+    <p class="snippets-import-hint">How should the imported snippets be combined with your current set?</p>
+    <div class="snippets-import-strategies">
+      <label class="snippets-strategy">
+        <input type="radio" name="snippet-strategy" value="merge" checked>
+        <span class="snippets-strategy-body">
+          <span class="snippets-strategy-name">Merge by category + name</span>
+          <span class="snippets-strategy-desc">Replace any current query that has the same category and name; append the rest. Recommended.</span>
+        </span>
+      </label>
+      <label class="snippets-strategy">
+        <input type="radio" name="snippet-strategy" value="append">
+        <span class="snippets-strategy-body">
+          <span class="snippets-strategy-name">Append all</span>
+          <span class="snippets-strategy-desc">Add imported categories at the end. Duplicates allowed.</span>
+        </span>
+      </label>
+      <label class="snippets-strategy">
+        <input type="radio" name="snippet-strategy" value="replace">
+        <span class="snippets-strategy-body">
+          <span class="snippets-strategy-name">Replace all</span>
+          <span class="snippets-strategy-desc">Discard the current snippets and use only the imported ones.</span>
+        </span>
+      </label>
+    </div>
+    <div id="snippets-import-status" class="snippets-import-status" aria-live="polite"></div>
+    <div class="dialog-actions">
+      <button type="button" id="btn-snippets-import-cancel">Cancel</button>
+      <button type="button" id="btn-snippets-import-ok" class="tunnel-add-btn">Import</button>
+    </div>
+  </dialog>
+
   <!-- Generic confirmation dialog -->
   <dialog id="confirm-dialog" class="confirm-dialog">
     <div class="confirm-icon" aria-hidden="true">
