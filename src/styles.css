@@ -1790,18 +1790,8 @@ dialog .radio-label input[type="radio"]:disabled + span {
 }
 .tunnel-note strong { color: var(--text); }
 
-.tunnel-hop-picker-row {
-  display: flex;
-  align-items: stretch;
-  gap: 6px;
-  margin-bottom: 6px;
-}
 .tunnel-hop-picker {
-  flex: 1;
-  /* `min-width: 0` lets the select shrink below its intrinsic option width
-     so long bastion labels stay clipped (via ellipsis) instead of pushing
-     the pencil button off-screen. */
-  min-width: 0;
+  width: 100%;
   background: var(--bg);
   border: 1px solid var(--border);
   color: var(--text);
@@ -1809,30 +1799,35 @@ dialog .radio-label input[type="radio"]:disabled + span {
   border-radius: var(--radius);
   font-size: 13px;
   outline: none;
-  text-overflow: ellipsis;
-  /* margin-bottom now lives on .tunnel-hop-picker-row */
+  margin-bottom: 6px;
 }
 .tunnel-hop-picker:focus { border-color: var(--accent); }
+
+/* Container for the per-hop actions (pencil + remove) in the hop header. */
+.tunnel-hop-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
 .tunnel-hop-edit {
-  flex: 0 0 auto;
-  width: 32px;
-  background: var(--bg);
-  border: 1px solid var(--border);
+  background: none;
+  border: none;
   color: var(--text-dim);
-  border-radius: var(--radius);
   cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 3px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  transition: border-color 0.15s, color 0.15s;
+  transition: color 0.15s, background 0.15s;
 }
 .tunnel-hop-edit:hover:not(:disabled) {
-  border-color: var(--accent);
   color: var(--accent);
+  background: rgba(137, 180, 250, 0.15);
 }
 .tunnel-hop-edit:disabled {
   cursor: not-allowed;
-  opacity: 0.4;
+  opacity: 0.35;
 }
 
 .tunnel-hop-legacy {

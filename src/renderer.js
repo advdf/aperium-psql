@@ -2041,16 +2041,16 @@ function renderHopElement(hop = {}, idx = 1) {
   el.innerHTML = `
     <div class="tunnel-hop-header">
       <span class="tunnel-hop-title">Hop <span class="tunnel-hop-num">${idx}</span></span>
-      <button type="button" class="tunnel-remove-hop" title="Remove hop">&times;</button>
+      <div class="tunnel-hop-actions">
+        <button type="button" class="tunnel-hop-edit" title="Edit this bastion" aria-label="Edit bastion" disabled>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/>
+          </svg>
+        </button>
+        <button type="button" class="tunnel-remove-hop" title="Remove hop">&times;</button>
+      </div>
     </div>
-    <div class="tunnel-hop-picker-row">
-      <select class="tunnel-hop-picker" data-hop-field="bastionId"></select>
-      <button type="button" class="tunnel-hop-edit" title="Edit this bastion" aria-label="Edit bastion" disabled>
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <path d="M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/>
-        </svg>
-      </button>
-    </div>
+    <select class="tunnel-hop-picker" data-hop-field="bastionId"></select>
     <div class="tunnel-hop-legacy hidden">
       <span class="tunnel-hop-legacy-label">Legacy inline bastion — migrate to library:</span>
       <button type="button" class="tunnel-migrate-btn">Save to library</button>
