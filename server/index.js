@@ -190,10 +190,18 @@ app.use('/static/assets', express.static(path.join(ROOT, 'assets')));
 app.use('/static/src', express.static(path.join(ROOT, 'src')));
 app.use('/static/node_modules', express.static(path.join(ROOT, 'node_modules')));
 
-// Session middleware is wired inside main() so SESSION_SECRET is resolved
-// from the KMS first. The `sessionMiddleware` reference below is filled in
-// from main() and used by the WebSocket upgrade handler.
+// Session middleware can't be built at module load — the secret has to be
+// resolved from the KMS first (see main()). To keep the route registration
+// below in the correct order (session-before-routes), we register a tiny
+// shim that delegates to `sessionMiddleware` once main() has wired it.
+// Requests that arrive before startup completes get a 503.
 let sessionMiddleware = null;
+app.use((req, res, next) => {
+  if (!sessionMiddleware) {
+    return res.status(503).json({ error: 'Server is still starting, retry in a moment.' });
+  }
+  return sessionMiddleware(req, res, next);
+});
 
 const trustProxy = process.env.TRUST_PROXY;
 if (trustProxy) {
@@ -656,7 +664,8 @@ async function main() {
     process.exit(1);
   }
 
-  // 3. Build session middleware with the resolved secret.
+  // 3. Build the session middleware with the resolved secret. The shim
+  //    registered at module load picks it up from this assignment.
   sessionMiddleware = session({
     store: new PgSession({ pool, schemaName: 'aperium', tableName: 'sessions' }),
     name: 'aperium.sid',
@@ -670,7 +679,6 @@ async function main() {
       maxAge: 30 * 24 * 60 * 60 * 1000,
     },
   });
-  app.use(sessionMiddleware);
 
   // 4. Initialize the DB schema (also triggers the lazy PG_PASSWORD
   //    resolution via the pool factory in db.js).
