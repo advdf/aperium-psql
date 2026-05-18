@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Aperium PSQL — Connexion</title>
+  <style>
+    :root {
+      --base: #1e1e2e;
+      --mantle: #181825;
+      --crust: #11111b;
+      --surface0: #313244;
+      --surface1: #45475a;
+      --surface2: #585b70;
+      --text: #cdd6f4;
+      --subtext1: #bac2de;
+      --subtext0: #a6adc8;
+      --overlay1: #7f849c;
+      --mauve: #cba6f7;
+      --red: #f38ba8;
+      --green: #a6e3a1;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      background: var(--base);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    }
+    .auth-wrap {
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+    .auth-card {
+      width: 100%;
+      max-width: 380px;
+      background: var(--mantle);
+      border: 1px solid var(--surface1);
+      border-radius: 8px;
+      padding: 28px;
+    }
+    .auth-title {
+      font-size: 18px;
+      font-weight: 600;
+      margin: 0 0 4px;
+      color: var(--text);
+    }
+    .auth-subtitle {
+      font-size: 13px;
+      color: var(--subtext0);
+      margin: 0 0 20px;
+    }
+    .tabs {
+      display: flex;
+      gap: 4px;
+      margin-bottom: 20px;
+      border-bottom: 1px solid var(--surface1);
+    }
+    .tab {
+      flex: 1;
+      padding: 10px;
+      background: none;
+      border: none;
+      color: var(--overlay1);
+      font-size: 13px;
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      margin-bottom: -1px;
+    }
+    .tab.active {
+      color: var(--mauve);
+      border-bottom-color: var(--mauve);
+    }
+    form { display: none; flex-direction: column; gap: 12px; }
+    form.active { display: flex; }
+    label {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      font-size: 12px;
+      color: var(--subtext1);
+    }
+    input {
+      background: var(--base);
+      border: 1px solid var(--surface2);
+      border-radius: 4px;
+      color: var(--text);
+      padding: 9px 11px;
+      font-size: 14px;
+      outline: none;
+      font-family: inherit;
+    }
+    input:focus { border-color: var(--mauve); }
+    button.submit {
+      background: var(--mauve);
+      color: var(--base);
+      border: none;
+      border-radius: 4px;
+      padding: 10px;
+      font-weight: 600;
+      font-size: 14px;
+      cursor: pointer;
+      margin-top: 4px;
+    }
+    button.submit:hover { filter: brightness(1.1); }
+    button.submit:disabled { opacity: 0.5; cursor: not-allowed; }
+    .err {
+      color: var(--red);
+      font-size: 12px;
+      min-height: 16px;
+      margin-top: 4px;
+    }
+  </style>
+</head>
+<body>
+  <div class="auth-wrap">
+    <div class="auth-card">
+      <h1 class="auth-title">Aperium PSQL</h1>
+      <p class="auth-subtitle">Connecte-toi pour accéder à tes connexions.</p>
+
+      <div class="tabs">
+        <button class="tab active" data-tab="login" type="button">Connexion</button>
+        <button class="tab" data-tab="register" type="button">Créer un compte</button>
+      </div>
+
+      <form id="login-form" class="active">
+        <label>Email
+          <input type="email" name="email" autocomplete="email" required>
+        </label>
+        <label>Mot de passe
+          <input type="password" name="password" autocomplete="current-password" required>
+        </label>
+        <div class="err" id="login-err"></div>
+        <button class="submit" type="submit">Se connecter</button>
+      </form>
+
+      <form id="register-form">
+        <label>Nom d'affichage
+          <input type="text" name="displayName" autocomplete="name" required>
+        </label>
+        <label>Email
+          <input type="email" name="email" autocomplete="email" required>
+        </label>
+        <label>Mot de passe (8 caractères minimum)
+          <input type="password" name="password" autocomplete="new-password" minlength="8" required>
+        </label>
+        <div class="err" id="register-err"></div>
+        <button class="submit" type="submit">Créer un compte</button>
+      </form>
+    </div>
+  </div>
+
+  <script>
+    const tabs = document.querySelectorAll('.tab');
+    const loginForm = document.getElementById('login-form');
+    const registerForm = document.getElementById('register-form');
+
+    tabs.forEach((tab) => {
+      tab.addEventListener('click', () => {
+        tabs.forEach((t) => t.classList.toggle('active', t === tab));
+        const target = tab.dataset.tab;
+        loginForm.classList.toggle('active', target === 'login');
+        registerForm.classList.toggle('active', target === 'register');
+        document.getElementById('login-err').textContent = '';
+        document.getElementById('register-err').textContent = '';
+      });
+    });
+
+    async function submit(form, url, errEl) {
+      const data = Object.fromEntries(new FormData(form));
+      const submitBtn = form.querySelector('button[type=submit]');
+      submitBtn.disabled = true;
+      errEl.textContent = '';
+      try {
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(data),
+        });
+        if (res.ok) {
+          window.location.href = '/';
+          return;
+        }
+        const body = await res.json().catch(() => ({}));
+        errEl.textContent = body.error || `Erreur (${res.status})`;
+      } catch (err) {
+        errEl.textContent = err.message;
+      } finally {
+        submitBtn.disabled = false;
+      }
+    }
+
+    loginForm.addEventListener('submit', (e) => {
+      e.preventDefault();
+      submit(loginForm, '/api/auth/login', document.getElementById('login-err'));
+    });
+
+    registerForm.addEventListener('submit', (e) => {
+      e.preventDefault();
+      submit(registerForm, '/api/auth/register', document.getElementById('register-err'));
+    });
+  </script>
+</body>
+</html>

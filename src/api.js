@@ -135,6 +135,55 @@
   }
 
   const api = {
+    getMe: async () => {
+      const res = await fetch('/api/auth/me');
+      if (!res.ok) return null;
+      return res.json();
+    },
+
+    login: async (email, password) => {
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password }),
+      });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'Login failed');
+      return res.json();
+    },
+
+    register: async (email, password, displayName) => {
+      const res = await fetch('/api/auth/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password, displayName }),
+      });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'Registration failed');
+      return res.json();
+    },
+
+    logout: async () => {
+      await fetch('/api/auth/logout', { method: 'POST' });
+      window.location.href = '/login';
+    },
+
+    updateProfile: async (data) => {
+      const res = await fetch('/api/profile', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+      });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'Update failed');
+      return res.json();
+    },
+
+    updateAvatar: async (file) => {
+      const formData = new FormData();
+      formData.append('avatar', file);
+      const res = await fetch('/api/profile', { method: 'PUT', body: formData });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'Avatar upload failed');
+      return res.json();
+    },
+
     listConnections: () => fetch('/api/connections').then((r) => r.json()),
 
     saveConnections: (conns) =>

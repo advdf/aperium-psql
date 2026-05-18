@@ -36,6 +36,25 @@
       <input type="text" id="conn-search" placeholder="Filter connections..." autocomplete="off">
     </div>
     <div id="connection-list"></div>
+    <div id="user-header" class="user-header hidden">
+      <div class="user-avatar" id="user-avatar"></div>
+      <div class="user-name" id="user-name"></div>
+      <div class="user-actions">
+        <button id="btn-profile" class="user-action-btn" title="Profile">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+            <circle cx="12" cy="7" r="4"/>
+          </svg>
+        </button>
+        <button id="btn-logout" class="user-action-btn" title="Logout">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+            <polyline points="16 17 21 12 16 7"/>
+            <line x1="21" y1="12" x2="9" y2="12"/>
+          </svg>
+        </button>
+      </div>
+    </div>
   </aside>
 
   <!-- Main area -->
@@ -338,6 +357,43 @@
     </form>
   </dialog>
 
+  <script src="/static/src/profile-modal.js"></script>
+  <script>
+    // GET / is gated server-side: an unauthenticated request is 302'd to
+    // /login before this script ever runs, so we can assume the user exists.
+    // We still fetch /api/auth/me to populate the sidebar header.
+    (async function () {
+      const renderUser = (u) => {
+        const header = document.getElementById('user-header');
+        const avatar = document.getElementById('user-avatar');
+        const name = document.getElementById('user-name');
+        avatar.replaceChildren();
+        if (u.avatarUrl) {
+          const img = document.createElement('img');
+          img.src = u.avatarUrl;
+          img.alt = 'avatar';
+          avatar.appendChild(img);
+        } else {
+          avatar.textContent = (u.displayName || u.email || 'U').charAt(0).toUpperCase();
+        }
+        name.textContent = u.displayName || u.email;
+        name.title = u.email;
+        header.classList.remove('hidden');
+      };
+
+      document.getElementById('btn-profile').addEventListener('click', () => window.openProfileModal());
+      document.getElementById('btn-logout').addEventListener('click', () => window.api.logout());
+      document.addEventListener('user-updated', (e) => renderUser(e.detail));
+
+      try {
+        const user = await window.api.getMe();
+        if (user) {
+          window.__currentUser = user;
+          renderUser(user);
+        }
+      } catch {}
+    })();
+  </script>
   <script src="/static/dist/renderer.bundle.js"></script>
   <script>
     // Mobile sidebar drawer: toggle, backdrop, auto-close on connection pick
