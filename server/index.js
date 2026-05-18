@@ -17,6 +17,7 @@ const profileRouter = require('./routes/profile');
 const {
   getSecretStore,
   looksLikeRef,
+  refBelongsTo,
   resolveBootSecret,
 } = require('./secrets');
 const {
@@ -52,7 +53,7 @@ function readPrivateKey(p, ctx) {
   return content;
 }
 
-async function resolveBastionCreds(source, ctx) {
+async function resolveBastionCreds(source, ctx, userId) {
   if (!source || !source.host || !source.user) {
     throw new Error(`${ctx}: host and user are required`);
   }
@@ -63,6 +64,9 @@ async function resolveBastionCreds(source, ctx) {
   // bastions.json.
   let privateKey;
   if (looksLikeRef(source.privateKeyRef)) {
+    if (!refBelongsTo(source.privateKeyRef, userId)) {
+      throw new Error(`${ctx} (${source.host}): privateKeyRef does not belong to this user`);
+    }
     try { privateKey = await store.get(source.privateKeyRef); }
     catch (err) { throw new Error(`${ctx} (${source.host}): privateKeyRef ${source.privateKeyRef.slice(0, 40)}…: ${err.message}`); }
   } else if (source.privateKeyPath) {
@@ -72,6 +76,9 @@ async function resolveBastionCreds(source, ctx) {
   }
   let passphrase;
   if (looksLikeRef(source.passphraseRef)) {
+    if (!refBelongsTo(source.passphraseRef, userId)) {
+      throw new Error(`${ctx} (${source.host}): passphraseRef does not belong to this user`);
+    }
     try { passphrase = await store.get(source.passphraseRef); }
     catch (err) { throw new Error(`${ctx} (${source.host}): passphraseRef: ${err.message}`); }
   }
@@ -95,7 +102,7 @@ async function resolveHops(hops, userId) {
     if (hop && hop.bastionId && !source) {
       throw new Error(`${ctx}: bastion ${hop.bastionId} not found`);
     }
-    out.push(await resolveBastionCreds(source, ctx));
+    out.push(await resolveBastionCreds(source, ctx, userId));
   }
   return out;
 }
@@ -175,9 +182,17 @@ function buildPsqlArgs(connection) {
 // Resolves the connection's password from the KMS (via passwordRef) and
 // returns an env object for spawning psql. Connections with no password
 // at all are fine (e.g. peer-auth Postgres on the same host).
-async function buildPsqlEnv(connection) {
+//
+// The userId guard is defense-in-depth: sanitizeConnectionForWrite already
+// refuses to persist a foreign-user ref, but the runtime check ensures a
+// record that reached disk through any other path (manual edit, race,
+// future code that bypasses sanitize) cannot leak another user's secret.
+async function buildPsqlEnv(connection, userId) {
   const env = { ...process.env };
   if (looksLikeRef(connection.passwordRef)) {
+    if (!refBelongsTo(connection.passwordRef, userId)) {
+      throw new Error('passwordRef does not belong to this user');
+    }
     try {
       env.PGPASSWORD = await getSecretStore().get(connection.passwordRef);
     } catch (err) {
@@ -363,7 +378,7 @@ app.post('/api/query', async (req, res) => {
   let env;
   try {
     tunnel = await maybeOpenTunnel(connection, userId);
-    env = await buildPsqlEnv(connection);
+    env = await buildPsqlEnv(connection, userId);
   } catch (err) {
     if (tunnel) { try { tunnel.close(); } catch {} }
     log('executeQuery setup error:', err.message);
@@ -490,7 +505,7 @@ app.post('/api/test-connection', async (req, res) => {
   let env;
   try {
     tunnel = await maybeOpenTunnel(connection, userId);
-    env = await buildPsqlEnv(connection);
+    env = await buildPsqlEnv(connection, userId);
   } catch (err) {
     if (tunnel) { try { tunnel.close(); } catch {} }
     return res.json({ ok: false, error: err.message, duration: Date.now() - startTime });
@@ -637,7 +652,7 @@ wss.on('connection', (ws, req) => {
         let env;
         try {
           tunnel = await maybeOpenTunnel(connection, userId);
-          env = await buildPsqlEnv(connection);
+          env = await buildPsqlEnv(connection, userId);
         } catch (err) {
           log('PTY setup error:', err.message);
           safeSend(JSON.stringify({ type: 'error', message: err.message }));

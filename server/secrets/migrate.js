@@ -6,7 +6,18 @@
 const fs = require('fs');
 const path = require('path');
 
-const { getSecretStore, looksLikeRef } = require('./index');
+const { getSecretStore, looksLikeRef, refBelongsTo } = require('./index');
+
+// Reject any user-scoped `*Ref` that doesn't belong to `userId`. Used by
+// the sanitize helpers below so a malicious client can't ship a forged
+// ref pointing at another user's secret. The throw produces a 500 from
+// the PUT handler — explicit "this is not your secret" rather than a
+// silent drop, so misuses surface in the audit log.
+function rejectForeignRef(field, ref, userId) {
+  if (!looksLikeRef(ref)) return;
+  if (refBelongsTo(ref, userId)) return;
+  throw new Error(`refused ${field} scoped to a different user: ${String(ref).slice(0, 60)}…`);
+}
 
 // Reads a private-key file from the local FS for migration into the KMS.
 // Returns `null` if the file is missing / unreadable — callers treat that
@@ -189,9 +200,11 @@ async function sanitizeConnectionForWrite(c, userId, store) {
   if (typeof out.password === 'string' && out.password.length > 0 && !looksLikeRef(out.password)) {
     out.passwordRef = await store.put(`connections/${userId}`, out.id || 'unknown', out.password);
   }
-  // If the client kept a stale passwordRef but no password, that's fine.
-  // If the client sent both, the cleartext wins (user intentionally changed it).
+  // If the client kept a stale passwordRef but no password, that's fine —
+  // as long as the ref belongs to this user. A forged ref pointing at
+  // another user's secret is refused outright.
   delete out.password;
+  rejectForeignRef('passwordRef', out.passwordRef, userId);
   return out;
 }
 
@@ -218,6 +231,10 @@ async function sanitizeBastionForWrite(b, userId, store, log = () => {}) {
     // else: leave the path so the request still resolves at tunnel-open
     // time; operator can fix the mount and re-save.
   }
+  // Cross-tenant guard: any *Ref still on the record at this point must
+  // belong to this user (forged refs from a malicious client are refused).
+  rejectForeignRef('passphraseRef', out.passphraseRef, userId);
+  rejectForeignRef('privateKeyRef', out.privateKeyRef, userId);
   return out;
 }
 

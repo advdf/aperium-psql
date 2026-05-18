@@ -26,6 +26,31 @@ function looksLikeRef(s) {
   return typeof s === 'string' && /^openbao:.+/.test(s);
 }
 
+// Cross-tenant guard. Every user-scoped ref produced by `store.put` has the
+// shape `openbao:<scope>/<userId>/<rest>` (connections, bastions, …). The
+// non-user-scoped refs (`openbao:server/…`) intentionally don't carry a
+// userId and are not accepted by this guard — server-scoped refs are
+// resolved through `resolveBootSecret`, not through user records, so they
+// never touch this helper.
+//
+// Returns `true` only if the ref is a user-scoped ref AND its userId
+// segment matches the caller's userId. Anything else (malformed, server-
+// scoped, foreign user) returns `false`. Callers MUST reject on `false`
+// when persisting or resolving user data — both at the write path
+// (sanitize) and at read time (defense-in-depth, in case a record reached
+// disk via a path that didn't sanitize).
+function refBelongsTo(ref, userId) {
+  if (!looksLikeRef(ref)) return false;
+  if (!userId || typeof userId !== 'string') return false;
+  const path = ref.slice('openbao:'.length);
+  const segments = path.split('/');
+  if (segments.length < 2) return false;
+  // segments[0] = scope name ("connections" | "bastions" | "server" | …)
+  // segments[1] = userId for user-scoped refs
+  if (segments[0] === 'server') return false;
+  return segments[1] === userId;
+}
+
 function getSecretStore() {
   if (cached) return cached;
   const kind = (process.env.APERIUM_KMS || '').trim().toLowerCase();
@@ -92,5 +117,6 @@ async function resolveBootSecret(envName, defaultRef, opts = {}) {
 module.exports = {
   getSecretStore,
   looksLikeRef,
+  refBelongsTo,
   resolveBootSecret,
 };
