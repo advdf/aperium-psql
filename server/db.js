@@ -1,10 +1,25 @@
+// App DB pool. PG_PASSWORD is resolved from the KMS the first time the pool
+// opens a connection — pg's Pool accepts an async function for `password`.
+// `initSchema()` triggers that first connection at boot, so the value is
+// cached well before any HTTP request hits a route.
+
 const { Pool } = require('pg');
+
+let cachedPassword = null;
+async function resolvePgPassword() {
+  if (cachedPassword !== null) return cachedPassword;
+  const { resolveBootSecret } = require('./secrets');
+  cachedPassword = await resolveBootSecret('PG_PASSWORD', 'openbao:server/pg-password', {
+    log: (...a) => console.log('[secrets]', ...a),
+  });
+  return cachedPassword;
+}
 
 const pool = new Pool({
   host: process.env.PG_HOST || 'localhost',
-  port: parseInt(process.env.PG_PORT || '5432'),
+  port: parseInt(process.env.PG_PORT || '5432', 10),
   user: process.env.PG_USER || 'postgres',
-  password: process.env.PG_PASSWORD || 'postgres',
+  password: resolvePgPassword,
   database: process.env.PG_DATABASE || 'postgres',
 });
 

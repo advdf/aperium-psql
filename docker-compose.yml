@@ -17,9 +17,22 @@ services:
       - PG_HOST=postgres
       - PG_PORT=5432
       - PG_USER=aperium
-      - PG_PASSWORD=aperium
+      # PG_PASSWORD is unset by default so the server falls back to the
+      # well-known KMS ref `openbao:server/pg-password`. The
+      # `openbao-bootstrap` one-shot below seeds that ref from POSTGRES_PASSWORD
+      # before aperium starts. Override here only when seeding manually (e.g.
+      # against a self-hosted KMS) — set to a ref or to a one-time literal.
+      - PG_PASSWORD=${PG_PASSWORD:-}
       - PG_DATABASE=aperium
-      - SESSION_SECRET=${SESSION_SECRET:-aperium-dev-secret-change-in-production}
+      # SESSION_SECRET unset = use the well-known ref. If the ref is missing
+      # the server auto-seeds 32 random bytes on first boot. Set this to a
+      # literal value to bootstrap a chosen secret (auto-pushed to the KMS
+      # with a warning to clear the env var on the next boot).
+      - SESSION_SECRET=${SESSION_SECRET:-}
+      - APERIUM_KMS=${APERIUM_KMS:-openbao}
+      - OPENBAO_ADDR=${OPENBAO_ADDR:-http://openbao:8200}
+      - OPENBAO_TOKEN=${OPENBAO_TOKEN:-aperium-dev-root}
+      - OPENBAO_MOUNT=${OPENBAO_MOUNT:-secret}
       # Set to 'true' when serving over HTTPS so the session cookie is
       # marked Secure. Leave unset for plain-HTTP localhost dev.
       - COOKIE_SECURE=${COOKIE_SECURE:-}
@@ -36,8 +49,12 @@ services:
       - public
       - internal
     depends_on:
-      - postgres
-      - bastion
+      postgres:
+        condition: service_started
+      bastion:
+        condition: service_started
+      openbao-bootstrap:
+        condition: service_completed_successfully
     restart: unless-stopped
 
   bastion:
@@ -68,11 +85,65 @@ services:
     # directly from the host.
     environment:
       - POSTGRES_USER=aperium
+      # The postgres image needs the password in plaintext on FIRST init to
+      # set up pg_hba.conf. Subsequent boots ignore it (auth lives in the
+      # data volume). Aperium itself reads PG_PASSWORD from the KMS.
       - POSTGRES_PASSWORD=aperium
       - POSTGRES_DB=aperium
     volumes:
       - ./data/pg:/var/lib/postgresql/data
       - ./scripts/init-postgres.sql:/docker-entrypoint-initdb.d/01-seed.sql:ro
+    networks:
+      - internal
+    restart: unless-stopped
+
+  # One-shot bootstrap: seeds the well-known boot-secret refs into OpenBao
+  # before aperium starts. Idempotent — values that already exist are left
+  # alone. In production replace this with whatever your operator runbook
+  # uses (`bao kv put`, Infisical UI, sealed-secrets, etc.).
+  openbao-bootstrap:
+    image: openbao/openbao:latest
+    container_name: aperium-openbao-bootstrap
+    depends_on:
+      openbao:
+        condition: service_healthy
+    environment:
+      - BAO_ADDR=http://openbao:8200
+      - BAO_TOKEN=aperium-dev-root
+      - PG_PASSWORD_SEED=aperium
+    entrypoint:
+      - sh
+      - -c
+      - 'if bao kv get -mount=secret aperium/server/pg-password > /dev/null 2>&1; then echo "[bootstrap] openbao:server/pg-password already present, skipping"; else bao kv put -mount=secret aperium/server/pg-password value="$$PG_PASSWORD_SEED" > /dev/null && echo "[bootstrap] seeded openbao:server/pg-password"; fi'
+    command: []
+    networks:
+      - internal
+    restart: "no"
+
+  # OpenBao dev-mode sidecar. Ephemeral — restarting wipes all secrets.
+  # See docs/kms.md for the production setup (persistent storage, sealing,
+  # auth methods, secret rotation).
+  openbao:
+    image: openbao/openbao:latest
+    container_name: aperium-openbao
+    command:
+      - server
+      - -dev
+      - -dev-root-token-id=aperium-dev-root
+      - -dev-listen-address=0.0.0.0:8200
+    environment:
+      - BAO_ADDR=http://127.0.0.1:8200
+      - BAO_TOKEN=aperium-dev-root
+    # Token is constant for dev. Production must use a real auth method and
+    # persistent storage — never `-dev`.
+    cap_add:
+      - IPC_LOCK
+    healthcheck:
+      test: ["CMD-SHELL", "bao status > /dev/null 2>&1 || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
     networks:
       - internal
     restart: unless-stopped
