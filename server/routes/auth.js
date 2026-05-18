@@ -6,6 +6,7 @@ const rateLimit = require('express-rate-limit');
 const { pool } = require('../db');
 const { DATA_DIR } = require('../dataPath');
 const requireAuth = require('../middleware/requireAuth');
+const { migrateForUser } = require('../secrets/migrate');
 
 const router = express.Router();
 
@@ -74,6 +75,10 @@ async function migrateLegacyDataIfNeeded(user) {
     }
   }
   fs.writeFileSync(flagFile, `${new Date().toISOString()} ${user.email}\n`);
+  // Push any plaintext that just landed in the user dir into the KMS so
+  // it never sits on disk longer than this function call.
+  try { await migrateForUser(DATA_DIR, user.id, (...a) => console.log('[secrets]', ...a)); }
+  catch (err) { console.error('[secrets] post-legacy migration failed:', err.message); }
 }
 
 router.post('/register', registerLimiter, async (req, res) => {

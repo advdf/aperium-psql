@@ -2,6 +2,7 @@ const express = require('express');
 const http = require('http');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 const { spawn } = require('child_process');
 const { WebSocketServer } = require('ws');
 const pty = require('node-pty');
@@ -13,6 +14,17 @@ const { userDataPath, DATA_DIR: USER_DATA_DIR } = require('./dataPath');
 const requireAuth = require('./middleware/requireAuth');
 const authRouter = require('./routes/auth');
 const profileRouter = require('./routes/profile');
+const {
+  getSecretStore,
+  looksLikeRef,
+  resolveBootSecret,
+} = require('./secrets');
+const {
+  runUserMigration,
+  sanitizeConnectionForWrite,
+  sanitizeBastionForWrite,
+  deleteOrphanedRefs,
+} = require('./secrets/migrate');
 
 function loadBastions(userId) {
   const file = userDataPath(userId, 'bastions.json');
@@ -34,49 +46,58 @@ function readPrivateKey(p, ctx) {
   return content;
 }
 
-function resolveBastionCreds(source, ctx) {
+async function resolveBastionCreds(source, ctx) {
   if (!source || !source.host || !source.user) {
     throw new Error(`${ctx}: host and user are required`);
   }
-  const keyPath = source.privateKeyPath;
-  // Legacy fallback: inline privateKey content stored directly in the bastion
-  // (pre-volume-mount layout). Kept working so old configs don't break, but
-  // new bastions must use privateKeyPath so the key never ends up in
-  // bastions.json / backups.
+  const store = getSecretStore();
+  // Prefer the ref. The path is only honored as a transitional fallback
+  // for bastions whose migration hasn't run yet (e.g. key file was missing
+  // at migration time). Once migrated, privateKeyPath is dropped from
+  // bastions.json.
   let privateKey;
-  if (keyPath) {
-    privateKey = readPrivateKey(keyPath, `${ctx} (${source.host})`);
-  } else if (source.privateKey) {
-    privateKey = source.privateKey;
+  if (looksLikeRef(source.privateKeyRef)) {
+    try { privateKey = await store.get(source.privateKeyRef); }
+    catch (err) { throw new Error(`${ctx} (${source.host}): privateKeyRef ${source.privateKeyRef.slice(0, 40)}…: ${err.message}`); }
+  } else if (source.privateKeyPath) {
+    privateKey = readPrivateKey(source.privateKeyPath, `${ctx} (${source.host})`);
   } else {
-    throw new Error(`${ctx} (${source.host}): privateKeyPath is required`);
+    throw new Error(`${ctx} (${source.host}): privateKeyRef or privateKeyPath is required`);
+  }
+  let passphrase;
+  if (looksLikeRef(source.passphraseRef)) {
+    try { passphrase = await store.get(source.passphraseRef); }
+    catch (err) { throw new Error(`${ctx} (${source.host}): passphraseRef: ${err.message}`); }
   }
   return {
     host: source.host,
     port: source.port,
     user: source.user,
     privateKey,
-    passphrase: source.passphrase,
+    passphrase,
   };
 }
 
-function resolveHops(hops, userId) {
+async function resolveHops(hops, userId) {
   const bastions = loadBastions(userId);
   const byId = new Map(bastions.map((b) => [b.id, b]));
-  return hops.map((hop, i) => {
+  const out = [];
+  for (let i = 0; i < hops.length; i++) {
+    const hop = hops[i];
     const ctx = `hop ${i + 1}`;
     const source = hop && hop.bastionId ? byId.get(hop.bastionId) : hop;
     if (hop && hop.bastionId && !source) {
       throw new Error(`${ctx}: bastion ${hop.bastionId} not found`);
     }
-    return resolveBastionCreds(source, ctx);
-  });
+    out.push(await resolveBastionCreds(source, ctx));
+  }
+  return out;
 }
 
 async function maybeOpenTunnel(connection, userId) {
   const t = connection && connection.tunnel;
   if (!t || !t.enabled || !Array.isArray(t.hops) || t.hops.length === 0) return null;
-  const resolved = resolveHops(t.hops, userId);
+  const resolved = await resolveHops(t.hops, userId);
   return openTunnelChain({
     hops: resolved,
     dbHost: connection.host,
@@ -145,9 +166,18 @@ function buildPsqlArgs(connection) {
   return args;
 }
 
-function buildPsqlEnv(connection) {
+// Resolves the connection's password from the KMS (via passwordRef) and
+// returns an env object for spawning psql. Connections with no password
+// at all are fine (e.g. peer-auth Postgres on the same host).
+async function buildPsqlEnv(connection) {
   const env = { ...process.env };
-  if (connection.password) env.PGPASSWORD = connection.password;
+  if (looksLikeRef(connection.passwordRef)) {
+    try {
+      env.PGPASSWORD = await getSecretStore().get(connection.passwordRef);
+    } catch (err) {
+      throw new Error(`passwordRef ${connection.passwordRef.slice(0, 40)}…: ${err.message}`);
+    }
+  }
   if (connection.sslmode) env.PGSSLMODE = connection.sslmode;
   return env;
 }
@@ -163,24 +193,21 @@ app.use('/static/assets', express.static(path.join(ROOT, 'assets')));
 app.use('/static/src', express.static(path.join(ROOT, 'src')));
 app.use('/static/node_modules', express.static(path.join(ROOT, 'node_modules')));
 
-const sessionMiddleware = session({
-  store: new PgSession({ pool, schemaName: 'aperium', tableName: 'sessions' }),
-  name: 'aperium.sid',
-  secret: process.env.SESSION_SECRET || 'aperium-dev-secret-change-in-production',
-  resave: false,
-  saveUninitialized: false,
-  cookie: {
-    httpOnly: true,
-    sameSite: 'strict',
-    secure: process.env.COOKIE_SECURE === 'true',
-    maxAge: 30 * 24 * 60 * 60 * 1000,
-  },
+// Session middleware can't be built at module load — the secret has to be
+// resolved from the KMS first (see main()). To keep the route registration
+// below in the correct order (session-before-routes), we register a tiny
+// shim that delegates to `sessionMiddleware` once main() has wired it.
+// Requests that arrive before startup completes get a 503.
+let sessionMiddleware = null;
+app.use((req, res, next) => {
+  if (!sessionMiddleware) {
+    return res.status(503).json({ error: 'Server is still starting, retry in a moment.' });
+  }
+  return sessionMiddleware(req, res, next);
 });
-app.use(sessionMiddleware);
 
 const trustProxy = process.env.TRUST_PROXY;
 if (trustProxy) {
-  // Accepts numeric hop count, IP/CIDR list, or 'true' for unconditional trust.
   app.set('trust proxy', /^\d+$/.test(trustProxy) ? Number(trustProxy) : trustProxy);
 }
 
@@ -200,10 +227,22 @@ app.get('/api/connections', (req, res) => {
   res.json(storeGet(file, 'connections', []));
 });
 
-app.put('/api/connections', (req, res) => {
+app.put('/api/connections', async (req, res) => {
+  if (!Array.isArray(req.body)) return res.status(400).json({ error: 'expected an array' });
+  const userId = req.session.userId;
   const file = userDataPath(req.session.userId, 'connections.json');
-  storeSet(file, 'connections', req.body);
-  res.json({ ok: true });
+  const store = getSecretStore();
+  try {
+    const oldList = storeGet(file, 'connections', []);
+    const sanitized = [];
+    for (const c of req.body) sanitized.push(await sanitizeConnectionForWrite(c, userId, store));
+    storeSet(file, 'connections', sanitized);
+    await deleteOrphanedRefs(oldList, sanitized, ['passwordRef'], store, log);
+    res.json({ ok: true });
+  } catch (err) {
+    log('PUT /api/connections error:', err.message);
+    res.status(500).json({ error: `Failed to save connections: ${err.message}` });
+  }
 });
 
 app.get('/api/snippets', (req, res) => {
@@ -223,8 +262,6 @@ app.get('/api/bastions', (req, res) => {
 });
 
 app.get('/api/psql-meta', (_req, res) => {
-  // Bundled list of psql backslash commands (extracted from `psql 18 -c '\?'`).
-  // Lives under server/ so it ships with the Docker image (data/ is a user volume).
   res.type('application/json').sendFile(path.join(__dirname, 'psql-meta.json'));
 });
 
@@ -234,7 +271,6 @@ app.get('/api/keys', (_req, res) => {
     const files = entries
       .filter((e) => e.isFile())
       .map((e) => e.name)
-      // Exclude public keys and hidden files — they're never what we want.
       .filter((n) => !n.endsWith('.pub') && !n.startsWith('.'))
       .sort()
       .map((n) => path.posix.join(KEYS_DIR.replace(/\\/g, '/'), n));
@@ -245,11 +281,22 @@ app.get('/api/keys', (_req, res) => {
   }
 });
 
-app.put('/api/bastions', (req, res) => {
+app.put('/api/bastions', async (req, res) => {
   if (!Array.isArray(req.body)) return res.status(400).json({ error: 'expected an array' });
-  const file = userDataPath(req.session.userId, 'bastions.json');
-  fs.writeFileSync(file, JSON.stringify(req.body, null, 2));
-  res.json({ ok: true });
+  const userId = req.session.userId;
+  const file = userDataPath(userId, 'bastions.json');
+  const store = getSecretStore();
+  try {
+    const oldList = loadBastions(userId);
+    const sanitized = [];
+    for (const b of req.body) sanitized.push(await sanitizeBastionForWrite(b, userId, store, log));
+    fs.writeFileSync(file, JSON.stringify(sanitized, null, 2));
+    await deleteOrphanedRefs(oldList, sanitized, ['passphraseRef', 'privateKeyRef'], store, log);
+    res.json({ ok: true });
+  } catch (err) {
+    log('PUT /api/bastions error:', err.message);
+    res.status(500).json({ error: `Failed to save bastions: ${err.message}` });
+  }
 });
 
 app.post('/api/query', async (req, res) => {
@@ -259,11 +306,14 @@ app.post('/api/query', async (req, res) => {
   const userId = req.session.userId;
   const startTime = Date.now();
   let tunnel = null;
+  let env;
   try {
     tunnel = await maybeOpenTunnel(connection, userId);
+    env = await buildPsqlEnv(connection);
   } catch (err) {
-    log('executeQuery tunnel error:', err.message);
-    return res.json({ error: `SSH tunnel: ${err.message}`, duration: Date.now() - startTime });
+    if (tunnel) { try { tunnel.close(); } catch {} }
+    log('executeQuery setup error:', err.message);
+    return res.json({ error: `${err.message}`, duration: Date.now() - startTime });
   }
 
   const effectiveConn = tunnel
@@ -273,12 +323,9 @@ app.post('/api/query', async (req, res) => {
   const trimmedQuery = String(query).trim();
   const isMeta = /(^|\n)\s*\\[a-zA-Z?!+]/.test(trimmedQuery);
 
-  // Meta-commands can't run under `--csv` (psql refuses). Use plain aligned output and
-  // disable the pager so output stays on stdout. Otherwise keep the existing CSV path.
   const args = isMeta
     ? ['--no-psqlrc', '-w', '-P', 'pager=off', '-c', trimmedQuery, ...buildPsqlArgs(effectiveConn)]
     : ['--csv', '--no-psqlrc', '-w', '-c', trimmedQuery, ...buildPsqlArgs(effectiveConn)];
-  const env = buildPsqlEnv(connection);
   log('executeQuery host:', connection.host, tunnel ? `(via tunnel -> 127.0.0.1:${tunnel.localPort})` : '', 'queryId:', queryId, isMeta ? '(meta)' : '');
 
   const proc = spawn(findPsqlBin(), args, { env });
@@ -347,10 +394,6 @@ app.delete('/api/query/:id', (req, res) => {
   res.json({ ok: true });
 });
 
-// Probe a connection without persisting it. For shell-mode connections we walk
-// the SSH chain up to the selected hop and tear it down — that proves the chain
-// and credentials work. For psql-mode we additionally run `select 1` through
-// the tunnel to validate Postgres-side auth/network.
 app.post('/api/test-connection', async (req, res) => {
   const { connection } = req.body || {};
   if (!connection) return res.status(400).json({ ok: false, error: 'connection is required' });
@@ -366,7 +409,7 @@ app.post('/api/test-connection', async (req, res) => {
       return res.json({ ok: false, error: 'shell mode requires an enabled SSH tunnel with at least one hop', duration: Date.now() - startTime });
     }
     let resolvedHops, sshShell;
-    try { resolvedHops = resolveHops(rawHops, userId); }
+    try { resolvedHops = await resolveHops(rawHops, userId); }
     catch (err) { return res.json({ ok: false, error: err.message, duration: Date.now() - startTime }); }
 
     const requested = Number.isInteger(connection.shellHopIndex)
@@ -389,18 +432,19 @@ app.post('/api/test-connection', async (req, res) => {
     });
   }
 
-  // psql mode: open tunnel (if any) + run `select 1`.
   let tunnel = null;
+  let env;
   try {
     tunnel = await maybeOpenTunnel(connection, userId);
+    env = await buildPsqlEnv(connection);
   } catch (err) {
-    return res.json({ ok: false, error: `SSH tunnel: ${err.message}`, duration: Date.now() - startTime });
+    if (tunnel) { try { tunnel.close(); } catch {} }
+    return res.json({ ok: false, error: err.message, duration: Date.now() - startTime });
   }
   const effectiveConn = tunnel
     ? { ...connection, host: tunnel.localHost, port: String(tunnel.localPort) }
     : connection;
   const args = ['--csv', '--no-psqlrc', '-w', '-c', 'select 1', ...buildPsqlArgs(effectiveConn)];
-  const env = buildPsqlEnv(connection);
   const proc = spawn(findPsqlBin(), args, { env });
 
   let stderr = '';
@@ -430,12 +474,14 @@ app.post('/api/test-connection', async (req, res) => {
 const server = http.createServer(app);
 const wss = new WebSocketServer({ noServer: true });
 
-// Apply session middleware on WebSocket upgrade before handing off to wss
-// Minimal Response shim so express-session (which patches res.end on writes)
-// can't crash the upgrade if it ever decides to touch headers on the read path.
 const noopRes = { setHeader() {}, getHeader() {}, removeHeader() {}, end() {}, writeHead() {} };
 server.on('upgrade', (req, socket, head) => {
   if (req.url && req.url.startsWith('/ws/pty')) {
+    if (!sessionMiddleware) {
+      socket.write('HTTP/1.1 503 Service Unavailable\r\n\r\n');
+      socket.destroy();
+      return;
+    }
     sessionMiddleware(req, noopRes, () => {
       if (!req.session?.userId) {
         socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
@@ -455,8 +501,8 @@ wss.on('connection', (ws, req) => {
   const url = new URL(req.url, 'http://x');
   const tabId = url.searchParams.get('tabId') || 'default';
   const userId = req.session.userId;
-  let shell = null;          // node-pty PTY (psql mode)
-  let sshShell = null;       // { stream, close } from openSshShell (shell mode)
+  let shell = null;
+  let sshShell = null;
   let tunnel = null;
 
   const safeSend = (payload) => {
@@ -496,7 +542,7 @@ wss.on('connection', (ws, req) => {
             if (rawHops.length === 0) {
               throw new Error('shell mode requires an enabled SSH tunnel with at least one hop');
             }
-            resolvedHops = resolveHops(rawHops, userId);
+            resolvedHops = await resolveHops(rawHops, userId);
             const requested = Number.isInteger(connection.shellHopIndex)
               ? connection.shellHopIndex
               : resolvedHops.length - 1;
@@ -534,12 +580,13 @@ wss.on('connection', (ws, req) => {
           return;
         }
 
-        // psql mode (default, backwards compatible)
+        let env;
         try {
           tunnel = await maybeOpenTunnel(connection, userId);
+          env = await buildPsqlEnv(connection);
         } catch (err) {
-          log('PTY tunnel error:', err.message);
-          safeSend(JSON.stringify({ type: 'error', message: `SSH tunnel: ${err.message}` }));
+          log('PTY setup error:', err.message);
+          safeSend(JSON.stringify({ type: 'error', message: err.message }));
           return;
         }
 
@@ -548,7 +595,6 @@ wss.on('connection', (ws, req) => {
           : connection;
 
         const args = ['-w', ...buildPsqlArgs(effectiveConn)];
-        const env = buildPsqlEnv(connection);
         env.PSQL_PAGER = 'cat';
         env.PAGER = 'cat';
         const psqlBin = findPsqlBin();
@@ -579,7 +625,6 @@ wss.on('connection', (ws, req) => {
       try { shell?.resize(msg.cols, msg.rows); } catch {}
       try { sshShell?.stream.setWindow(msg.rows, msg.cols, 0, 0); } catch {}
     } else if (msg.type === 'send-query') {
-      // No-op in shell mode (the client hides the button, but defend in depth).
       try { shell?.write(String(msg.query || '').trim() + '\r'); } catch {}
     } else if (msg.type === 'kill') {
       teardown();
@@ -593,16 +638,79 @@ wss.on('connection', (ws, req) => {
 
 const PORT = Number(process.env.PORT) || 8080;
 
-initSchema()
-  .then(() => {
-    server.listen(PORT, '0.0.0.0', () => {
-      log(`Aperium PSQL server listening on 0.0.0.0:${PORT}`);
+async function main() {
+  // 1. Bring up the KMS client and check it's reachable BEFORE doing
+  //    anything that needs secrets. Fatal if unreachable — no plaintext
+  //    fallback.
+  let store;
+  try {
+    store = getSecretStore();
+    await store.healthcheck();
+    log(`KMS: ${store.kind} reachable`);
+  } catch (err) {
+    log('KMS init failed:', err.message);
+    process.exit(1);
+  }
+
+  // 2. Resolve the session secret. Accepts a ref env var, a literal
+  //    (auto-bootstrapped to the KMS with a warning), or no env var
+  //    (read from the default ref; auto-seeded with random bytes if
+  //    the default ref is missing, which is the dev-mode case).
+  let sessionSecret;
+  try {
+    sessionSecret = await resolveBootSecret('SESSION_SECRET', 'openbao:server/session-secret', {
+      log,
+      bootstrap: () => crypto.randomBytes(32).toString('hex'),
     });
-  })
-  .catch((err) => {
+  } catch (err) {
+    log('SESSION_SECRET resolution failed:', err.message);
+    process.exit(1);
+  }
+
+  // 3. Build the session middleware with the resolved secret. The shim
+  //    registered at module load picks it up from this assignment.
+  sessionMiddleware = session({
+    store: new PgSession({ pool, schemaName: 'aperium', tableName: 'sessions' }),
+    name: 'aperium.sid',
+    secret: sessionSecret,
+    resave: false,
+    saveUninitialized: false,
+    cookie: {
+      httpOnly: true,
+      sameSite: 'strict',
+      secure: process.env.COOKIE_SECURE === 'true',
+      maxAge: 30 * 24 * 60 * 60 * 1000,
+    },
+  });
+
+  // 4. Initialize the DB schema (also triggers the lazy PG_PASSWORD
+  //    resolution via the pool factory in db.js).
+  try {
+    await initSchema();
+  } catch (err) {
     log('DB schema init failed:', err.message);
     process.exit(1);
+  }
+
+  // 5. Walk per-user data and migrate any remaining cleartext secrets
+  //    into the KMS. Idempotent: rerunning is a no-op once everything
+  //    is already refs.
+  try {
+    await runUserMigration(USER_DATA_DIR, log);
+  } catch (err) {
+    log('Auto-migration error (continuing):', err.message);
+  }
+
+  // 6. Listen.
+  server.listen(PORT, '0.0.0.0', () => {
+    log(`Aperium PSQL server listening on 0.0.0.0:${PORT}`);
   });
+}
+
+main().catch((err) => {
+  log('Fatal startup error:', err && err.stack || err);
+  process.exit(1);
+});
 
 function shutdown(sig) {
   log(`${sig} received, shutting down`);

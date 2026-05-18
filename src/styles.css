@@ -1803,6 +1803,33 @@ dialog .radio-label input[type="radio"]:disabled + span {
 }
 .tunnel-hop-picker:focus { border-color: var(--accent); }
 
+/* Container for the per-hop actions (pencil + remove) in the hop header. */
+.tunnel-hop-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.tunnel-hop-edit {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 3px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.15s, background 0.15s;
+}
+.tunnel-hop-edit:hover:not(:disabled) {
+  color: var(--accent);
+  background: rgba(137, 180, 250, 0.15);
+}
+.tunnel-hop-edit:disabled {
+  cursor: not-allowed;
+  opacity: 0.35;
+}
+
 .tunnel-hop-legacy {
   background: rgba(249, 226, 175, 0.08);
   border: 1px solid var(--yellow);
@@ -2085,6 +2112,118 @@ dialog .radio-label input[type="radio"]:disabled + span {
 .backup-status {
   font-size: 11px;
   color: var(--text-dim);
+}
+
+/* Snippets import strategy dialog */
+.snippets-import-dialog {
+  width: min(520px, calc(100vw - 24px));
+  background: var(--bg-surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 20px;
+}
+.snippets-import-dialog[open] { display: block; }
+.snippets-import-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.55);
+}
+.snippets-import-dialog h3 {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 10px;
+}
+.snippets-import-info {
+  font-size: 12px;
+  color: var(--green);
+  margin-bottom: 6px;
+  line-height: 1.4;
+  min-height: 1em;
+}
+.snippets-import-hint {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-bottom: 14px;
+  line-height: 1.4;
+}
+.snippets-import-strategies {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.snippets-strategy {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+.snippets-strategy:hover {
+  border-color: var(--text-dim);
+}
+.snippets-strategy input[type="radio"] {
+  margin-top: 2px;
+  accent-color: var(--accent);
+}
+.snippets-strategy:has(input[type="radio"]:checked) {
+  border-color: var(--accent);
+  background: rgba(137, 180, 250, 0.06);
+}
+.snippets-strategy-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+}
+.snippets-strategy-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+}
+.snippets-strategy-desc {
+  font-size: 11px;
+  color: var(--text-dim);
+  line-height: 1.4;
+}
+.snippets-import-status {
+  font-size: 12px;
+  margin-bottom: 8px;
+  min-height: 1em;
+  color: var(--text-dim);
+}
+.snippets-import-status.snippets-import-status-error {
+  color: var(--red);
+}
+
+/* Floating toast for snippet-import status (no host dialog) */
+.snippets-floating-toast {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 10000;
+  padding: 10px 16px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--text);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  max-width: min(480px, calc(100vw - 32px));
+  text-align: center;
+}
+.snippets-floating-toast.hidden { display: none; }
+.snippets-floating-toast-ok {
+  border-color: var(--green);
+  color: var(--green);
+}
+.snippets-floating-toast-error {
+  border-color: var(--red);
+  color: var(--red);
 }
 
 /* Mobile: wider dialog already handled; make sure fieldset doesn't overflow */

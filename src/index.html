@@ -46,6 +46,12 @@
             <circle cx="12" cy="7" r="4"/>
           </svg>
         </button>
+        <button id="btn-manage-bastions-sidebar" class="user-action-btn" title="Manage bastions">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+          </svg>
+        </button>
         <button id="btn-logout" class="user-action-btn" title="Logout">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
@@ -175,7 +181,7 @@
   <dialog id="backup-dialog" class="backup-dialog">
     <h3>Backup &amp; restore</h3>
     <p class="backup-warning">
-      <strong>Heads up:</strong> the export includes your Postgres passwords and SSH private keys <em>in plain text</em>. Store the file somewhere safe.
+      <strong>Heads up:</strong> the export contains <em>references</em> to your secrets in the configured KMS (OpenBao) — never the plaintext. The file is safe to keep but <strong>useless without the matching KMS</strong>: importing it on a different instance will not restore connectivity unless the same KMS, paths, and ACLs are available.
     </p>
 
     <section class="backup-section">
@@ -231,6 +237,41 @@
         <button type="button" id="btn-bastion-save">Save</button>
       </div>
     </section>
+  </dialog>
+
+  <!-- Snippets import strategy dialog -->
+  <dialog id="snippets-import-dialog" class="snippets-import-dialog">
+    <h3>Import snippets</h3>
+    <p id="snippets-import-info" class="snippets-import-info"></p>
+    <p class="snippets-import-hint">How should the imported snippets be combined with your current set?</p>
+    <div class="snippets-import-strategies">
+      <label class="snippets-strategy">
+        <input type="radio" name="snippet-strategy" value="merge" checked>
+        <span class="snippets-strategy-body">
+          <span class="snippets-strategy-name">Merge by category + name</span>
+          <span class="snippets-strategy-desc">Replace any current query that has the same category and name; append the rest. Recommended.</span>
+        </span>
+      </label>
+      <label class="snippets-strategy">
+        <input type="radio" name="snippet-strategy" value="append">
+        <span class="snippets-strategy-body">
+          <span class="snippets-strategy-name">Append all</span>
+          <span class="snippets-strategy-desc">Add imported categories at the end. Duplicates allowed.</span>
+        </span>
+      </label>
+      <label class="snippets-strategy">
+        <input type="radio" name="snippet-strategy" value="replace">
+        <span class="snippets-strategy-body">
+          <span class="snippets-strategy-name">Replace all</span>
+          <span class="snippets-strategy-desc">Discard the current snippets and use only the imported ones.</span>
+        </span>
+      </label>
+    </div>
+    <div id="snippets-import-status" class="snippets-import-status" aria-live="polite"></div>
+    <div class="dialog-actions">
+      <button type="button" id="btn-snippets-import-cancel">Cancel</button>
+      <button type="button" id="btn-snippets-import-ok" class="tunnel-add-btn">Import</button>
+    </div>
   </dialog>
 
   <!-- Generic confirmation dialog -->

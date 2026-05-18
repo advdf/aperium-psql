@@ -13,7 +13,7 @@ A clean, modern PostgreSQL client served as a **web app**. Combines a real `psql
 - **Import** connections from a JSON or CSV file (with dedup by `host:port/database@user`)
 - **Duplicate** a connection, or **open in a new tab** (`+` button or Cmd/Ctrl+click)
 - **SSH tunnel (multi-hop)** — connect through an arbitrary chain of bastions (1, 2, 3+ hops). Each hop authenticates with a private key (PEM / OpenSSH), optionally passphrase-protected. The **key content never touches Aperium's config** — bastions store only the key's *path inside the container*, and the operator mounts the actual key file as a Docker volume (e.g. `-v ~/.ssh:/keys:ro`). Implemented as local port forwarding: the server opens the SSH chain, binds `127.0.0.1:<ephemeral>` as the tunnel exit, and `psql` connects to that — so `PGPASSWORD`, CSV parsing, PTY prompt and SIGTERM cancellation all behave exactly as for a direct connection.
-- **Backup & restore** — export every connection and bastion as a single JSON or YAML file, re-import anywhere. Because bastions reference keys by path, the backup file contains no secret material for SSH (Postgres passwords still travel in plain text, so store the file securely).
+- **Backup & restore** — export every connection and bastion as a single JSON or YAML file, re-import anywhere. The export contains only KMS *references* to the underlying secrets (Postgres passwords, SSH passphrases) — never the plaintext. The file is safe to version-control or share, but is **useless without access to the same KMS** that produced it.
 - **Deep-link** — open a specific connection straight from a URL: `http://localhost:8080/?open=<id-or-name>`. The lookup tries `id` (UUID) first, then exact `name`. Lets external tools (monitoring dashboards à la Nagstamon/Excubitor, bookmarks, OS launchers) jump directly to a connection without going through the sidebar. The `open` parameter is consumed and stripped from the URL so a reload doesn't re-open the tab. Example custom action: `xdg-open "http://aperium.lan:8080/?open=$(printf '%s' "$name" | jq -sRr @uri)"`.
 
 ### Tabs
@@ -194,7 +194,7 @@ Then create a connection:
 
 Add more hops referencing the same bastion (or new ones) to exercise the multi-hop path.
 
-> Postgres passwords still live in `./data/connections.json` in plain text — same contract as before. Only the SSH key material has moved out of that file.
+> Postgres passwords (and SSH passphrases) are stored as **opaque references** to an external KMS — see [docs/kms.md](docs/kms.md). The compose stack ships a dev-mode OpenBao sidecar so this works out of the box.
 
 To skip the tunnel entirely (direct connection), put `postgres` on the `public` network instead and expose `5432` as needed.
 
@@ -221,7 +221,7 @@ connections:
     host: postgres.internal
     port: "5432"
     user: reader
-    password: hunter2
+    passwordRef: "openbao:connections/<userId>/<connId>/<uuid>"
     database: app
     sslmode: ""
     tunnel:
@@ -235,7 +235,7 @@ bastions:
     port: "22"
     user: jump
     privateKeyPath: /keys/prod-bastion_id_rsa
-    passphrase: ""
+    passphraseRef: "openbao:bastions/<userId>/b-prod/passphrase/<uuid>"
 ```
 
 ### Remote deployment
@@ -294,11 +294,12 @@ docker-compose.yml
 
 Default host path when using the provided compose file: `./data/`.
 
-- `connections.json`
-- `snippets.json`
+- `<userId>/connections.json` — connection records with `passwordRef`
+- `<userId>/bastions.json` — bastion records with `passphraseRef` / `privateKeyRef`
+- `<userId>/snippets.json`
 - `aperium.log` — server debug log
 
-> ⚠️ Connection passwords are stored in plain text, protected only by filesystem (and volume) permissions. Exports (CSV/JSON) include passwords when the source connection has one.
+> All sensitive values live in the configured KMS (OpenBao) — never on disk. See [docs/kms.md](docs/kms.md). The default `docker-compose.yml` runs an OpenBao dev sidecar so the install works without any extra setup; production deployments should swap it for a real KMS.
 
 ## How it works
 
