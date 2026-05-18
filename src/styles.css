@@ -1790,8 +1790,14 @@ dialog .radio-label input[type="radio"]:disabled + span {
 }
 .tunnel-note strong { color: var(--text); }
 
+.tunnel-hop-picker-row {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+  margin-bottom: 6px;
+}
 .tunnel-hop-picker {
-  width: 100%;
+  flex: 1;
   background: var(--bg);
   border: 1px solid var(--border);
   color: var(--text);
@@ -1799,9 +1805,30 @@ dialog .radio-label input[type="radio"]:disabled + span {
   border-radius: var(--radius);
   font-size: 13px;
   outline: none;
-  margin-bottom: 6px;
+  /* margin-bottom now lives on .tunnel-hop-picker-row */
 }
 .tunnel-hop-picker:focus { border-color: var(--accent); }
+.tunnel-hop-edit {
+  flex: 0 0 auto;
+  width: 32px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  border-radius: var(--radius);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: border-color 0.15s, color 0.15s;
+}
+.tunnel-hop-edit:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.tunnel-hop-edit:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
 
 .tunnel-hop-legacy {
   background: rgba(249, 226, 175, 0.08);

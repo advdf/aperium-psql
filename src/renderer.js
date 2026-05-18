@@ -2011,13 +2011,22 @@ const tunnelHopsList = document.getElementById('tunnel-hops-list');
 const btnAddHop = document.getElementById('btn-add-hop');
 const btnManageBastions = document.getElementById('btn-manage-bastions');
 
+// Bastions are sorted by name (case-insensitive, locale-aware) everywhere
+// they are listed. A single helper keeps the order consistent between the
+// hop pickers in the connection dialog and the bastions manager list.
+function sortedBastions() {
+  return [...bastionsCache].sort((a, b) =>
+    (a.name || '').localeCompare(b.name || '', undefined, { sensitivity: 'base' })
+  );
+}
+
 function renderHopPickerOptions(selectEl, selectedId) {
   selectEl.innerHTML = '';
   const empty = document.createElement('option');
   empty.value = '';
   empty.textContent = bastionsCache.length ? '— pick a bastion —' : '— no saved bastions —';
   selectEl.appendChild(empty);
-  for (const b of bastionsCache) {
+  for (const b of sortedBastions()) {
     const opt = document.createElement('option');
     opt.value = b.id;
     opt.textContent = bastionSummary(b);
@@ -2034,14 +2043,30 @@ function renderHopElement(hop = {}, idx = 1) {
       <span class="tunnel-hop-title">Hop <span class="tunnel-hop-num">${idx}</span></span>
       <button type="button" class="tunnel-remove-hop" title="Remove hop">&times;</button>
     </div>
-    <select class="tunnel-hop-picker" data-hop-field="bastionId"></select>
+    <div class="tunnel-hop-picker-row">
+      <select class="tunnel-hop-picker" data-hop-field="bastionId"></select>
+      <button type="button" class="tunnel-hop-edit" title="Edit this bastion" aria-label="Edit bastion" disabled>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/>
+        </svg>
+      </button>
+    </div>
     <div class="tunnel-hop-legacy hidden">
       <span class="tunnel-hop-legacy-label">Legacy inline bastion — migrate to library:</span>
       <button type="button" class="tunnel-migrate-btn">Save to library</button>
     </div>
   `;
   const select = el.querySelector('.tunnel-hop-picker');
+  const editBtn = el.querySelector('.tunnel-hop-edit');
+  const syncEditBtn = () => { editBtn.disabled = !select.value; };
   renderHopPickerOptions(select, hop.bastionId);
+  syncEditBtn();
+  select.addEventListener('change', syncEditBtn);
+  editBtn.addEventListener('click', async () => {
+    const id = select.value;
+    if (!id) return;
+    await openBastionsManager({ openDetailFor: id });
+  });
 
   const legacy = el.querySelector('.tunnel-hop-legacy');
   const hasInline = !hop.bastionId && (hop.host || hop.user || hop.privateKey);
@@ -2129,6 +2154,12 @@ btnAddHop.addEventListener('click', () => {
 });
 
 btnManageBastions.addEventListener('click', () => openBastionsManager());
+
+// Sidebar gear: open the bastions manager without going through the
+// connection dialog. The button lives next to the profile / logout
+// buttons in the user header.
+const btnManageBastionsSidebar = document.getElementById('btn-manage-bastions-sidebar');
+btnManageBastionsSidebar?.addEventListener('click', () => openBastionsManager());
 
 // ---- Shell mode form helpers (connection dialog) ----
 const terminalShellEl = document.getElementById('terminal-shell');
@@ -2243,7 +2274,7 @@ function renderBastionsListView() {
     bastionsListView.appendChild(empty);
     return;
   }
-  for (const b of bastionsCache) {
+  for (const b of sortedBastions()) {
     const row = document.createElement('div');
     row.className = 'bastion-list-row';
     row.dataset.id = b.id;
@@ -2361,10 +2392,16 @@ async function persistBastions() {
   });
 }
 
-async function openBastionsManager() {
+async function openBastionsManager(opts = {}) {
   await Promise.all([loadBastionsCache(), loadKeysCache()]);
-  backToList();
-  bastionsDialog.showModal();
+  if (opts.openDetailFor && bastionsCache.some((b) => b.id === opts.openDetailFor)) {
+    // Skip the list view and go straight to detail (used by the pencil
+    // button next to each hop in the connection dialog).
+    openBastionDetail(opts.openDetailFor);
+  } else {
+    backToList();
+  }
+  if (!bastionsDialog.open) bastionsDialog.showModal();
 }
 
 btnNewBastion.addEventListener('click', () => openBastionDetail('__new__'));
