@@ -100,7 +100,7 @@ services:
   # One-shot bootstrap: seeds the well-known boot-secret refs into OpenBao
   # before aperium starts. Idempotent — values that already exist are left
   # alone. In production replace this with whatever your operator runbook
-  # uses (`bao kv put`, Infisical UI, sealed-secrets, etc.).
+  # uses (`bao kv put`, an init job, sealed-secrets, etc.).
   openbao-bootstrap:
     image: openbao/openbao:latest
     container_name: aperium-openbao-bootstrap

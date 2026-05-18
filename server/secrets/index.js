@@ -2,8 +2,7 @@
 // passphrases, inline private keys, the session secret, and the app DB
 // password) flow through this module instead of living on disk or in env
 // vars. The selected adapter is chosen by APERIUM_KMS:
-//   - "openbao"    → server/secrets/openbao.js
-//   - "infisical"  → server/secrets/infisical.js
+//   - "openbao"  → server/secrets/openbao.js
 // Anything else is fatal at boot. There is no plaintext fallback.
 //
 // A "ref" is an opaque string of the form `${adapter}:<adapter-specific>`.
@@ -18,12 +17,11 @@
 // should catch and inspect `err.code === 'NOT_FOUND'`.
 
 const createOpenBao = require('./openbao');
-const createInfisical = require('./infisical');
 
 let cached = null;
 
 function looksLikeRef(s) {
-  return typeof s === 'string' && /^(openbao|infisical):.+/.test(s);
+  return typeof s === 'string' && /^openbao:.+/.test(s);
 }
 
 function refAdapter(ref) {
@@ -35,14 +33,12 @@ function getSecretStore() {
   if (cached) return cached;
   const kind = (process.env.APERIUM_KMS || '').trim().toLowerCase();
   if (!kind) {
-    throw new Error('APERIUM_KMS is not set. Configure an open-source KMS (openbao or infisical) — see docs/kms.md.');
+    throw new Error('APERIUM_KMS is not set. Configure an open-source KMS (openbao) — see docs/kms.md.');
   }
   if (kind === 'openbao') {
     cached = createOpenBao();
-  } else if (kind === 'infisical') {
-    cached = createInfisical();
   } else {
-    throw new Error(`APERIUM_KMS=${kind} is not a supported adapter. Use "openbao" or "infisical".`);
+    throw new Error(`APERIUM_KMS=${kind} is not a supported adapter. Only "openbao" is currently supported.`);
   }
   cached.kind = kind;
   return cached;

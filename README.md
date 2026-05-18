@@ -299,7 +299,7 @@ Default host path when using the provided compose file: `./data/`.
 - `<userId>/snippets.json`
 - `aperium.log` — server debug log
 
-> All sensitive values live in the configured KMS (OpenBao or Infisical) — never on disk. See [docs/kms.md](docs/kms.md). The default `docker-compose.yml` runs an OpenBao dev sidecar so the install works without any extra setup; production deployments should swap it for a real KMS.
+> All sensitive values live in the configured KMS (OpenBao) — never on disk. See [docs/kms.md](docs/kms.md). The default `docker-compose.yml` runs an OpenBao dev sidecar so the install works without any extra setup; production deployments should swap it for a real KMS.
 
 ## How it works
 

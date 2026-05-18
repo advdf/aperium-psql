@@ -1,18 +1,17 @@
-# KMS integration
+# KMS integration (OpenBao)
 
 Aperium does not store sensitive values on disk or in environment
 variables. Postgres passwords, SSH bastion passphrases, inline private
 keys, the session secret, and the app DB password all live in an open-
-source KMS and are resolved on-demand by the server.
+source KMS (OpenBao) and are resolved on-demand by the server.
 
 This page covers:
 
 1. [What gets stored where](#1-what-gets-stored-where)
-2. [Choosing an adapter](#2-choosing-an-adapter)
-3. [OpenBao (recommended for self-host)](#3-openbao-recommended-for-self-host)
-4. [Infisical](#4-infisical)
-5. [Migrating an existing install](#5-migrating-an-existing-install)
-6. [Operating: rotation, backup, recovery](#6-operating-rotation-backup-recovery)
+2. [Dev sidecar (the shipped compose)](#2-dev-sidecar-the-shipped-compose)
+3. [Production setup](#3-production-setup)
+4. [Migrating an existing install](#4-migrating-an-existing-install)
+5. [Operating: rotation, backup, recovery](#5-operating-rotation-backup-recovery)
 
 ---
 
@@ -27,42 +26,26 @@ After the migration:
   field is unchanged — key files on the mounted `/keys` volume are
   out of scope for the KMS.
 - The `aperium-psql` container env has `PG_PASSWORD` and
-  `SESSION_SECRET` set to refs (or unset, in which case the server
-  uses well-known default refs). `docker inspect` shows refs, not
-  values.
+  `SESSION_SECRET` either empty (server falls back to the well-known
+  default ref) or set to a ref. `docker inspect` shows refs, not
+  values. The only plaintext credential in the env is
+  `OPENBAO_TOKEN` — the bootstrap credential to the KMS itself. In
+  production, swap this for a Docker secret mount or an external
+  auth method (AppRole / OIDC / k8s SA).
 
-A "ref" is an opaque string of the shape `${adapter}:<adapter-path>`.
+A "ref" is an opaque string of the shape `openbao:<adapter-path>`.
 Examples:
 
 - `openbao:server/session-secret`
 - `openbao:server/pg-password`
 - `openbao:connections/<userId>/<connId>/<uuid>`
-- `infisical:prod:aperium__server__session_secret`
+
+The selector env var is `APERIUM_KMS=openbao`. Any other value is
+fatal at boot.
 
 ---
 
-## 2. Choosing an adapter
-
-|                          | OpenBao | Infisical |
-|--------------------------|---------|-----------|
-| License                  | MPL-2.0 (Vault fork) | MIT |
-| Self-host story          | Single binary; built-in dev mode; HA via storage backend | Multi-service (API + frontend + Postgres + Redis); docker-compose recipe upstream |
-| API style                | Vault HTTP API (KV v2) | REST + Universal-Auth |
-| Aperium ref format       | `openbao:<path>` | `infisical:<env>:<name>` |
-| Aperium env vars         | `OPENBAO_ADDR`, `OPENBAO_TOKEN`, `OPENBAO_MOUNT` | `INFISICAL_ADDR`, `INFISICAL_CLIENT_ID`, `INFISICAL_CLIENT_SECRET`, `INFISICAL_PROJECT_ID`, `INFISICAL_ENV` |
-| Best for                 | Operators who already run Vault or want a single-binary deploy | Teams who want a web UI for secret browsing and per-environment overrides |
-
-Either is fine — pick the one your operators already know. Switching
-later is possible but requires re-pushing every secret.
-
-Set `APERIUM_KMS=openbao` or `APERIUM_KMS=infisical`. Any other value
-is fatal at boot.
-
----
-
-## 3. OpenBao (recommended for self-host)
-
-### 3.1 Dev sidecar (already in `docker-compose.yml`)
+## 2. Dev sidecar (the shipped compose)
 
 The shipped `docker-compose.yml` runs OpenBao in **dev mode** alongside
 the app:
@@ -93,10 +76,20 @@ OPENBAO_TOKEN=aperium-dev-root
 OPENBAO_MOUNT=secret
 ```
 
-This is **enough to develop and demo** the app. Do not run it in
+A small `openbao-bootstrap` one-shot container seeds the well-known
+`server/pg-password` ref from the postgres init password before
+aperium starts. The `session-secret` ref is auto-seeded by aperium
+itself with 32 random bytes if missing.
+
+This is **enough to develop and demo** the app. The "dev mode" label
+refers to OpenBao's run flag — the binary itself is the production
+binary, just configured for localhost convenience (no TLS, no
+persistence, single fixed token). Do not run this configuration in
 production.
 
-### 3.2 Production setup
+---
+
+## 3. Production setup
 
 In production you want:
 
@@ -152,67 +145,19 @@ volume that aperium reads on startup).
 
 ---
 
-## 4. Infisical
-
-Self-hosting Infisical needs more moving parts than OpenBao: a
-backing Postgres, Redis, the API container, and the frontend. The
-upstream `docker-compose.yml`
-(<https://github.com/Infisical/infisical>) is the recommended
-starting point. Aperium does not ship an Infisical sidecar — bring
-your own.
-
-### 4.1 Setup checklist
-
-1. Stand up Infisical (self-hosted) and create an account.
-2. Create a project. Note the **project ID**.
-3. Create an environment slug (default in aperium: `prod`). The
-   Infisical UI calls these "environments".
-4. Settings → Machine Identities → create a new universal-auth
-   identity. Add it to the project with `Member` permissions plus
-   custom access to `Read / Create / Update / Delete` on the `prod`
-   environment.
-5. Copy the `clientId` and `clientSecret` for the identity.
-6. Set the aperium env vars:
-
-   ```
-   APERIUM_KMS=infisical
-   INFISICAL_ADDR=https://infisical.yourdomain.tld
-   INFISICAL_CLIENT_ID=<from-step-5>
-   INFISICAL_CLIENT_SECRET=<from-step-5>
-   INFISICAL_PROJECT_ID=<from-step-2>
-   INFISICAL_ENV=prod
-   ```
-
-7. Bootstrap the boot secrets: see section 5.
-
-### 4.2 Name shape
-
-Infisical does not allow `/` in secret names, so user secrets are
-flattened with double underscores. Examples:
-
-- `aperium__server__session_secret`
-- `aperium__server__pg_password`
-- `aperium__connections__<userId>__<connId>__<uuid>`
-
-You can browse them in the Infisical UI under the chosen environment.
-
----
-
-## 5. Migrating an existing install
+## 4. Migrating an existing install
 
 When you upgrade from a pre-KMS version of aperium:
 
 1. **Stop the aperium container.**
-2. **Decide on an adapter** and bring it up (OpenBao dev sidecar is
-   the fastest path).
-3. **Set the env vars** in `docker-compose.yml` (the shipped file
-   already has the OpenBao defaults wired).
-4. **Restart aperium.** On boot the server walks every
+2. **Set `APERIUM_KMS=openbao`** plus the OpenBao env vars (the
+   shipped `docker-compose.yml` already has the dev defaults wired).
+3. **Restart aperium.** On boot the server walks every
    `data/<userId>/{connections,bastions}.json`, pushes any
    plaintext `password` / `passphrase` / inline `privateKey` into
    the KMS, and rewrites the file with `*Ref` strings. Look for
    `[migrate] user=<uuid> connections: N migrated, …` log lines.
-5. **Verify** that no plaintext remains:
+4. **Verify** that no plaintext remains:
 
    ```sh
    grep -rE '"password"|"passphrase"|"privateKey"\s*:\s*"-' data/
@@ -220,7 +165,7 @@ When you upgrade from a pre-KMS version of aperium:
 
    should return nothing (only `*Ref` fields).
 
-6. **Boot secrets**. The first time the server starts with KMS
+5. **Boot secrets**. The first time the server starts with KMS
    configured:
 
    - If `SESSION_SECRET` is **unset** and the well-known ref is
@@ -231,13 +176,15 @@ When you upgrade from a pre-KMS version of aperium:
      logs a warning. Remove the env var (or replace it with the
      printed ref) on the next boot.
    - `PG_PASSWORD` cannot be auto-generated (Postgres has its own
-     copy in the data volume). Provide the existing literal once;
-     the server pushes it to the KMS and warns. Remove the env var
-     on the next boot.
+     copy in the data volume). The shipped compose handles this via
+     the `openbao-bootstrap` one-shot which seeds the value from
+     `POSTGRES_PASSWORD`. For self-managed deployments, seed
+     manually with `bao kv put secret/aperium/server/pg-password
+     value=<your-password>` before the first aperium boot.
 
 ---
 
-## 6. Operating: rotation, backup, recovery
+## 5. Operating: rotation, backup, recovery
 
 - **Rotation.** Push a new value at the same ref. `putAt` is
   idempotent. The next time the server reads the ref (next query
@@ -247,14 +194,22 @@ When you upgrade from a pre-KMS version of aperium:
   (sidebar → "Backup / restore") now contains only refs. Keep it as
   part of your normal backup — but remember the file is **useless
   without the KMS**.
-  Back up the KMS itself separately:
-  - OpenBao: snapshot the storage volume (`/openbao/file`) and the
-    unseal keys.
-  - Infisical: follow upstream documentation (the secrets live in
-    Infisical's Postgres).
+  Back up the KMS itself separately: snapshot the OpenBao storage
+  volume (`/openbao/file`) and the unseal keys.
 - **Disaster recovery.** Restoring requires three things, in order:
   (1) the KMS data (including unseal/admin tokens), (2) the
   aperium data volume (`data/`), and (3) the aperium image. Any of
   them alone is insufficient.
-- **Auditing.** Every read/write is a normal HTTP call to the KMS,
-  which logs them. Use the KMS's audit log for who-read-what trails.
+- **Auditing.** Every read/write is a normal HTTP call to OpenBao,
+  which logs them. Enable the audit log for who-read-what trails.
+
+---
+
+## A note on other adapters
+
+The `SecretStore` interface in `server/secrets/index.js` is
+deliberately small (`get` / `put` / `putAt` / `delete` /
+`healthcheck`). Plugging in a different KMS (Infisical, AWS Secrets
+Manager, Doppler, …) is roughly one new file under `server/secrets/`
+and a branch in the `getSecretStore()` switch. None ship today —
+PRs welcome.
