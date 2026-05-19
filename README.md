@@ -13,6 +13,7 @@ A clean, modern PostgreSQL client served as a **web app**. Combines a real `psql
 - **Import** connections from a JSON or CSV file (with dedup by `host:port/database@user`)
 - **Duplicate** a connection, or **open in a new tab** (`+` button or Cmd/Ctrl+click)
 - **SSH tunnel (multi-hop)** — connect through an arbitrary chain of bastions (1, 2, 3+ hops). Each hop authenticates with a private key (PEM / OpenSSH), optionally passphrase-protected. The **key content never touches Aperium's config** — bastions store only the key's *path inside the container*, and the operator mounts the actual key file as a Docker volume (e.g. `-v ~/.ssh:/keys:ro`). Implemented as local port forwarding: the server opens the SSH chain, binds `127.0.0.1:<ephemeral>` as the tunnel exit, and `psql` connects to that — so `PGPASSWORD`, CSV parsing, PTY prompt and SIGTERM cancellation all behave exactly as for a direct connection.
+- **Peer mode** — alternative to TCP for the psql connection: when the final SSH hop is also the PostgreSQL host, run `psql` directly on that hop over its Unix socket, relying on PostgreSQL's `peer` authentication. No TCP forwarding, no password stored. Orthogonal to *Open shell* (shell mode wins if both are set). Per connection you choose the target hop, the OS user that will own the psql process, and whether to `sudo -niu <user>` before running. Same query runner, test-connection and interactive PTY behaviour as TCP mode. See [Peer mode prerequisites](#peer-mode-prerequisites) for the server-side setup.
 - **Backup & restore** — export every connection and bastion as a single JSON or YAML file, re-import anywhere. The export contains only KMS *references* to the underlying secrets (Postgres passwords, SSH passphrases) — never the plaintext. The file is safe to version-control or share, but is **useless without access to the same KMS** that produced it.
 - **Deep-link** — open a specific connection straight from a URL: `http://localhost:8080/?open=<id-or-name>`. The lookup tries `id` (UUID) first, then exact `name`. Lets external tools (monitoring dashboards à la Nagstamon/Excubitor, bookmarks, OS launchers) jump directly to a connection without going through the sidebar. The `open` parameter is consumed and stripped from the URL so a reload doesn't re-open the tab. Example custom action: `xdg-open "http://aperium.lan:8080/?open=$(printf '%s' "$name" | jq -sRr @uri)"`.
 
@@ -197,6 +198,34 @@ Add more hops referencing the same bastion (or new ones) to exercise the multi-h
 > Postgres passwords (and SSH passphrases) are stored as **opaque references** to an external KMS — see [docs/kms.md](docs/kms.md). The compose stack ships a dev-mode OpenBao sidecar so this works out of the box.
 
 To skip the tunnel entirely (direct connection), put `postgres` on the `public` network instead and expose `5432` as needed.
+
+### Peer mode prerequisites
+
+Peer mode skips the TCP forwarder and runs `psql` directly on the final SSH hop, authenticating to PostgreSQL via the local Unix socket (`peer` auth — OS user identity is the PG role identity). It only makes sense when **the last bastion in the chain is also the PostgreSQL host**.
+
+In the connection dialog, switch the *psql connection* radio from **TCP** to **Peer** and fill the *Peer target* fields (the *Open shell* checkbox is independent — leave it off to run psql, tick it to override with a plain SSH shell):
+
+| Field | Notes |
+|---|---|
+| Run psql on | The hop where `psql` will execute. Defaults to the last hop, which is the typical case. |
+| OS user (peer) | The OS user that will own the `psql` process. Defaults to `postgres`. Must satisfy `^[a-zA-Z_][a-zA-Z0-9_-]*$` (POSIX safe). |
+| Use `sudo -niu <OS user>` | Tick this if the SSH user (e.g. `dalibo`) differs from the OS user that the PG role maps to (e.g. `postgres`). `sudo` is invoked non-interactively (`-n`) — it fails immediately if no NOPASSWD entry exists, rather than hanging on a password prompt. |
+
+Host / Port / Password / SSL Mode are ignored in peer mode. Database and User (the PG role passed to `psql -U`) still apply.
+
+**DBA actions required on the database host** (these are NOT automated by Aperium):
+
+1. `psql` must be installed and on `$PATH` for the OS user that will run it.
+2. If `peerOsUser` differs from the SSH user and you keep `peerSudo` ticked, add an entry like the following to `/etc/sudoers.d/aperium-peer`:
+
+   ```
+   dalibo ALL=(postgres) NOPASSWD: /usr/bin/psql
+   ```
+
+   Adjust `dalibo` (SSH user), `postgres` (target OS user) and `/usr/bin/psql` (binary path) to match your host. `visudo -cf /etc/sudoers.d/aperium-peer` to validate before saving.
+3. If you'd rather connect as the SSH user directly (no `sudo`), a matching PostgreSQL role must exist (`CREATE ROLE dalibo LOGIN;`) and, if its name differs from the OS user, a `pg_ident.conf` mapping plus a `peer` line in `pg_hba.conf` referencing that map.
+
+Cancellation works the same as TCP mode (the **Stop** button closes the SSH exec channel, which kills the remote `psql`). Errors from `sudo`, missing `psql`, or `peer` rejection are surfaced inline in the editor / terminal.
 
 ### Backup & restore
 

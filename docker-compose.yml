@@ -7,12 +7,6 @@ services:
       - "8088:8080"
     volumes:
       - ./data:/data
-      # SSH private keys: optional staging area. The operator drops a key
-      # file here, picks it via the bastions UI; on save the SERVER reads
-      # the file content and pushes it to the KMS as `privateKeyRef`.
-      # The key file itself can then be deleted from the host. See
-      # docs/kms.md for the migration path from path-based bastions.
-      - ./keys:/keys:ro
       # Read-only mount of the openbao-state volume so we can resolve
       # OPENBAO_TOKEN_FILE without ever putting the token in env vars.
       - openbao-state:/openbao/state:ro

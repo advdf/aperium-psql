@@ -215,10 +215,11 @@ async function applyImportPayload(userId, payload, log = () => {}) {
       out.privateKeyRef = await store.put(`bastions/${userId}/${out.id || 'unknown'}`, 'privateKey', out.privateKey);
     }
     delete out.privateKey;
-    // legacy import: privateKeyPath becomes a content push too
+    // Disk-key support removed: a privateKeyPath in an old backup is dropped.
     if (typeof out.privateKeyPath === 'string' && out.privateKeyPath.length > 0 && !looksLikeRef(out.privateKeyRef)) {
-      log(`[import] bastion ${out.id || '?'}: privateKeyPath ${out.privateKeyPath} kept verbatim (no inline content to push)`);
+      log(`[import] bastion ${out.id || '?'}: privateKeyPath ${out.privateKeyPath} dropped (disk keys no longer supported)`);
     }
+    delete out.privateKeyPath;
     newBasts.push(out);
   }
 
