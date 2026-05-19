@@ -39,41 +39,20 @@ function loadBastions(userId) {
   catch { return []; }
 }
 
-function readPrivateKey(p, ctx) {
-  if (!p) throw new Error(`${ctx}: no private key path`);
-  let content;
-  try {
-    content = fs.readFileSync(p, 'utf-8');
-  } catch (err) {
-    if (err.code === 'ENOENT') throw new Error(`${ctx}: private key file not found: ${p}`);
-    if (err.code === 'EACCES') throw new Error(`${ctx}: cannot read private key (permission denied): ${p}`);
-    throw new Error(`${ctx}: cannot read private key ${p}: ${err.message}`);
-  }
-  if (!content.trim()) throw new Error(`${ctx}: private key file is empty: ${p}`);
-  return content;
-}
-
 async function resolveBastionCreds(source, ctx, userId) {
   if (!source || !source.host || !source.user) {
     throw new Error(`${ctx}: host and user are required`);
   }
   const store = getSecretStore();
-  // Prefer the ref. The path is only honored as a transitional fallback
-  // for bastions whose migration hasn't run yet (e.g. key file was missing
-  // at migration time). Once migrated, privateKeyPath is dropped from
-  // bastions.json.
-  let privateKey;
-  if (looksLikeRef(source.privateKeyRef)) {
-    if (!refBelongsTo(source.privateKeyRef, userId)) {
-      throw new Error(`${ctx} (${source.host}): privateKeyRef does not belong to this user`);
-    }
-    try { privateKey = await store.get(source.privateKeyRef); }
-    catch (err) { throw new Error(`${ctx} (${source.host}): privateKeyRef ${source.privateKeyRef.slice(0, 40)}…: ${err.message}`); }
-  } else if (source.privateKeyPath) {
-    privateKey = readPrivateKey(source.privateKeyPath, `${ctx} (${source.host})`);
-  } else {
-    throw new Error(`${ctx} (${source.host}): privateKeyRef or privateKeyPath is required`);
+  if (!looksLikeRef(source.privateKeyRef)) {
+    throw new Error(`${ctx} (${source.host}): privateKeyRef is required`);
   }
+  if (!refBelongsTo(source.privateKeyRef, userId)) {
+    throw new Error(`${ctx} (${source.host}): privateKeyRef does not belong to this user`);
+  }
+  let privateKey;
+  try { privateKey = await store.get(source.privateKeyRef); }
+  catch (err) { throw new Error(`${ctx} (${source.host}): privateKeyRef ${source.privateKeyRef.slice(0, 40)}…: ${err.message}`); }
   let passphrase;
   if (looksLikeRef(source.passphraseRef)) {
     if (!refBelongsTo(source.passphraseRef, userId)) {
@@ -119,7 +98,6 @@ async function maybeOpenTunnel(connection, userId) {
 }
 
 const DATA_DIR = process.env.APERIUM_DATA_DIR || path.join(__dirname, '..', 'data');
-const KEYS_DIR = process.env.APERIUM_KEYS_DIR || '/keys';
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
 const PSQL_CANDIDATE_PATHS = ['/usr/bin/psql', '/usr/local/bin/psql'];
@@ -284,22 +262,6 @@ app.get('/api/bastions', (req, res) => {
 
 app.get('/api/psql-meta', (_req, res) => {
   res.type('application/json').sendFile(path.join(__dirname, 'psql-meta.json'));
-});
-
-app.get('/api/keys', (_req, res) => {
-  try {
-    const entries = fs.readdirSync(KEYS_DIR, { withFileTypes: true });
-    const files = entries
-      .filter((e) => e.isFile())
-      .map((e) => e.name)
-      .filter((n) => !n.endsWith('.pub') && !n.startsWith('.'))
-      .sort()
-      .map((n) => path.posix.join(KEYS_DIR.replace(/\\/g, '/'), n));
-    res.json({ dir: KEYS_DIR, files });
-  } catch (err) {
-    if (err.code === 'ENOENT') return res.json({ dir: KEYS_DIR, files: [], error: `keys dir not found: ${KEYS_DIR}` });
-    res.status(500).json({ dir: KEYS_DIR, files: [], error: err.message });
-  }
 });
 
 app.put('/api/bastions', async (req, res) => {

@@ -336,8 +336,6 @@
       return res.json();
     },
 
-    listKeys: () => fetch('/api/keys').then((r) => r.json()),
-
     loadPsqlMeta: () => fetch('/api/psql-meta').then((r) => r.json()).catch(() => []),
 
     openSnippetsInEditor: async () => {
