@@ -57,6 +57,12 @@ function isShellMode(conn) {
   return conn && conn.terminalMode === 'shell';
 }
 
+function isPeerMode(conn) {
+  // Peer is orthogonal to shell: shell mode wins (no psql is run), so peer is
+  // only effective when shell mode is off.
+  return conn && conn.psqlMode === 'peer' && conn.terminalMode !== 'shell';
+}
+
 // ---- Sidebar search ----
 connSearch.addEventListener('input', () => {
   // When searching, expand all groups to show matches
@@ -655,7 +661,12 @@ async function spawnTabTerminal(tab) {
 
 function applyTerminalChrome(tab) {
   const shellMode = tab && isShellMode(tab.connection);
-  if (terminalLabel) terminalLabel.textContent = shellMode ? 'Shell' : 'psql terminal';
+  const peerMode = tab && isPeerMode(tab.connection);
+  if (terminalLabel) {
+    terminalLabel.textContent = shellMode ? 'Shell' : (peerMode ? 'psql (peer)' : 'psql terminal');
+  }
+  // The "send snippet" button only makes sense when a psql REPL is on the
+  // other side. Peer mode IS psql (just over SSH), so keep it visible.
   if (btnSendTerminal) btnSendTerminal.classList.toggle('hidden', !!shellMode);
 }
 
@@ -663,15 +674,25 @@ function formatConnectionInfo(conn) {
   if (!conn) return '';
   if (isShellMode(conn)) {
     const hops = conn.tunnel?.hops || [];
-    const idx = Number.isInteger(conn.shellHopIndex)
-      ? conn.shellHopIndex
-      : Math.max(0, hops.length - 1);
+    const idx = Number.isInteger(conn.shellHopIndex) ? conn.shellHopIndex : Math.max(0, hops.length - 1);
     const hop = hops[idx];
     const bastion = hop?.bastionId ? bastionsCache.find((b) => b.id === hop.bastionId) : null;
     const user = bastion?.user || hop?.user || 'ssh';
     const host = bastion?.host || hop?.host || '?';
     const port = bastion?.port || hop?.port || 22;
     return `${user}@${host}:${port} (hop ${idx + 1}/${hops.length})`;
+  }
+  if (isPeerMode(conn)) {
+    const hops = conn.tunnel?.hops || [];
+    const idx = Number.isInteger(conn.peerHopIndex) ? conn.peerHopIndex : Math.max(0, hops.length - 1);
+    const hop = hops[idx];
+    const bastion = hop?.bastionId ? bastionsCache.find((b) => b.id === hop.bastionId) : null;
+    const sshUser = bastion?.user || hop?.user || 'ssh';
+    const host = bastion?.host || hop?.host || '?';
+    const port = bastion?.port || hop?.port || 22;
+    const peerUser = conn.peerOsUser || sshUser;
+    const sudo = conn.peerSudo && peerUser !== sshUser ? ' via sudo' : '';
+    return `${sshUser}@${host}:${port} → psql as ${peerUser}${sudo} (hop ${idx + 1}/${hops.length})`;
   }
   return `${conn.user || 'postgres'}@${conn.host || 'localhost'}:${conn.port || 5432}/${conn.database || 'postgres'}`;
 }
@@ -2150,10 +2171,22 @@ btnManageBastions.addEventListener('click', () => openBastionsManager());
 const btnManageBastionsSidebar = document.getElementById('btn-manage-bastions-sidebar');
 btnManageBastionsSidebar?.addEventListener('click', () => openBastionsManager());
 
-// ---- Shell mode form helpers (connection dialog) ----
+// ---- Form helpers (connection dialog) ----
+// Two orthogonal dimensions:
+//   - `terminalMode === 'shell'` (checkbox): open an SSH shell on a hop INSTEAD of psql.
+//   - `psqlMode` (radios, tcp|peer): how psql reaches PostgreSQL when running
+//     (TCP via tunnel/direct, or peer over Unix socket on the last hop).
+// Shell mode wins at runtime — psqlMode is irrelevant when terminalMode === 'shell'
+// but is still persisted so toggling shell off restores the chosen psql mode.
 const terminalShellEl = document.getElementById('terminal-shell');
 const shellOptionsFieldset = document.getElementById('shell-options');
 const shellHopIndexEl = document.getElementById('shell-hop-index');
+
+const psqlModeRadios = document.querySelectorAll('input[name="psql-mode"]');
+const peerOptionsFieldset = document.getElementById('peer-options');
+const peerHopIndexEl = document.getElementById('peer-hop-index');
+const peerOsUserEl = document.getElementById('peer-os-user');
+const peerSudoEl = document.getElementById('peer-sudo');
 
 function currentHopBastionIds() {
   if (!tunnelEnabled.checked) return [];
@@ -2165,55 +2198,90 @@ function bastionLabel(id) {
   return b ? bastionSummary(b) : '— pick a bastion —';
 }
 
-function syncShellHopOptions() {
+function syncHopSelect(selectEl) {
   const ids = currentHopBastionIds();
-  const previous = shellHopIndexEl.value;
-  shellHopIndexEl.innerHTML = '';
+  const previous = selectEl.value;
+  selectEl.innerHTML = '';
   if (ids.length === 0) {
     const opt = document.createElement('option');
     opt.value = '';
     opt.textContent = '— add an SSH hop first —';
-    shellHopIndexEl.appendChild(opt);
-    shellHopIndexEl.disabled = true;
+    selectEl.appendChild(opt);
+    selectEl.disabled = true;
     return;
   }
-  shellHopIndexEl.disabled = false;
+  selectEl.disabled = false;
   ids.forEach((id, i) => {
     const opt = document.createElement('option');
     opt.value = String(i);
     opt.textContent = `Hop ${i + 1} — ${bastionLabel(id)}`;
-    shellHopIndexEl.appendChild(opt);
+    selectEl.appendChild(opt);
   });
-  // Preserve previous selection if still in range, else default to last hop.
   const prevIdx = Number(previous);
   if (Number.isInteger(prevIdx) && prevIdx >= 0 && prevIdx < ids.length) {
-    shellHopIndexEl.value = String(prevIdx);
+    selectEl.value = String(prevIdx);
   } else {
-    shellHopIndexEl.value = String(ids.length - 1);
+    selectEl.value = String(ids.length - 1);
   }
 }
 
+function syncShellHopOptions() { syncHopSelect(shellHopIndexEl); }
+function syncPeerHopOptions()  { syncHopSelect(peerHopIndexEl); }
+
+function getSelectedPsqlMode() {
+  for (const r of psqlModeRadios) if (r.checked) return r.value;
+  return 'tcp';
+}
+
+function setSelectedPsqlMode(mode) {
+  const m = mode === 'peer' ? 'peer' : 'tcp';
+  for (const r of psqlModeRadios) r.checked = (r.value === m);
+  peerOptionsFieldset.classList.toggle('hidden', m !== 'peer');
+}
+
 function renderShellForm(conn) {
-  const enabled = isShellMode(conn);
-  terminalShellEl.checked = enabled;
-  shellOptionsFieldset.classList.toggle('hidden', !enabled);
+  // Shell checkbox (orthogonal to psql mode)
+  const shellOn = !!(conn && conn.terminalMode === 'shell');
+  terminalShellEl.checked = shellOn;
+  shellOptionsFieldset.classList.toggle('hidden', !shellOn);
   syncShellHopOptions();
-  // Apply the saved hop index if valid; otherwise default to last hop (already set by sync).
   if (Number.isInteger(conn?.shellHopIndex)) {
     const max = shellHopIndexEl.options.length - 1;
     if (conn.shellHopIndex >= 0 && conn.shellHopIndex <= max) {
       shellHopIndexEl.value = String(conn.shellHopIndex);
     }
   }
+
+  // psql mode radios + peer options
+  const psqlMode = conn?.psqlMode === 'peer' ? 'peer' : 'tcp';
+  setSelectedPsqlMode(psqlMode);
+  syncPeerHopOptions();
+  if (Number.isInteger(conn?.peerHopIndex)) {
+    const max = peerHopIndexEl.options.length - 1;
+    if (conn.peerHopIndex >= 0 && conn.peerHopIndex <= max) {
+      peerHopIndexEl.value = String(conn.peerHopIndex);
+    }
+  }
+  peerOsUserEl.value = typeof conn?.peerOsUser === 'string' ? conn.peerOsUser : '';
+  peerSudoEl.checked = !!conn?.peerSudo;
 }
 
 function readShellFromForm() {
-  if (!terminalShellEl.checked) return { terminalMode: undefined, shellHopIndex: undefined };
-  const idx = Number.parseInt(shellHopIndexEl.value, 10);
-  return {
-    terminalMode: 'shell',
-    shellHopIndex: Number.isInteger(idx) && idx >= 0 ? idx : null,
-  };
+  const out = {};
+  if (terminalShellEl.checked) {
+    const idx = Number.parseInt(shellHopIndexEl.value, 10);
+    out.terminalMode = 'shell';
+    out.shellHopIndex = Number.isInteger(idx) && idx >= 0 ? idx : null;
+  }
+  if (getSelectedPsqlMode() === 'peer') {
+    const idx = Number.parseInt(peerHopIndexEl.value, 10);
+    const osUser = peerOsUserEl.value.trim();
+    out.psqlMode = 'peer';
+    out.peerHopIndex = Number.isInteger(idx) && idx >= 0 ? idx : null;
+    out.peerOsUser = osUser || null;
+    out.peerSudo = !!peerSudoEl.checked;
+  }
+  return out;
 }
 
 terminalShellEl.addEventListener('change', () => {
@@ -2221,9 +2289,17 @@ terminalShellEl.addEventListener('change', () => {
   if (terminalShellEl.checked) syncShellHopOptions();
 });
 
+for (const r of psqlModeRadios) {
+  r.addEventListener('change', () => {
+    const mode = getSelectedPsqlMode();
+    peerOptionsFieldset.classList.toggle('hidden', mode !== 'peer');
+    if (mode === 'peer') syncPeerHopOptions();
+  });
+}
+
 // Refresh available hops whenever the chain changes (add/remove hop, picker change, toggle).
-tunnelHopsList.addEventListener('change', () => syncShellHopOptions());
-tunnelEnabled.addEventListener('change', () => syncShellHopOptions());
+tunnelHopsList.addEventListener('change', () => { syncShellHopOptions(); syncPeerHopOptions(); });
+tunnelEnabled.addEventListener('change', () => { syncShellHopOptions(); syncPeerHopOptions(); });
 
 // ---- Bastions manager dialog (master-detail) ----
 const bastionsDialog = document.getElementById('bastions-dialog');
@@ -2731,14 +2807,20 @@ btnTestConn.addEventListener('click', async () => {
   // Build a temporary connection object from the current form state — that way
   // the user can test edits before saving them.
   const data = Object.fromEntries(new FormData(form));
-  delete data.id; delete data['tunnel-enabled']; delete data['terminal-shell']; delete data['shell-target'];
+  delete data.id; delete data['tunnel-enabled']; delete data['terminal-shell']; delete data['shell-target']; delete data['psql-mode'];
   const tunnel = readTunnelFromForm();
   tunnel.hops = tunnel.hops.filter((h) => h.bastionId || h.host || h.user || h.privateKey);
   data.tunnel = tunnel;
-  const shellCfg = readShellFromForm();
-  if (shellCfg.terminalMode === 'shell') {
+  const cfg = readShellFromForm();
+  if (cfg.terminalMode === 'shell') {
     data.terminalMode = 'shell';
-    data.shellHopIndex = shellCfg.shellHopIndex;
+    data.shellHopIndex = cfg.shellHopIndex;
+  }
+  if (cfg.psqlMode === 'peer') {
+    data.psqlMode = 'peer';
+    data.peerHopIndex = cfg.peerHopIndex;
+    if (cfg.peerOsUser) data.peerOsUser = cfg.peerOsUser;
+    data.peerSudo = cfg.peerSudo;
   }
 
   showDialogToast('loading', 'Testing connection…');
@@ -2763,6 +2845,7 @@ form.addEventListener('submit', async (e) => {
   delete data['tunnel-enabled'];
   delete data['terminal-shell'];
   delete data['shell-target'];
+  delete data['psql-mode'];
   const tunnel = readTunnelFromForm();
   // Drop empty hops: neither a ref nor inline data
   tunnel.hops = tunnel.hops.filter((h) => h.bastionId || h.host || h.user || h.privateKey);
@@ -2772,31 +2855,57 @@ form.addEventListener('submit', async (e) => {
   }
   data.tunnel = tunnel;
 
-  const shellCfg = readShellFromForm();
-  if (shellCfg.terminalMode === 'shell') {
+  const cfg = readShellFromForm();
+  if (cfg.terminalMode === 'shell') {
     if (!tunnel.enabled || tunnel.hops.length === 0) {
       alert('Shell mode requires an enabled SSH tunnel with at least one bastion.');
       return;
     }
-    if (shellCfg.shellHopIndex == null || shellCfg.shellHopIndex < 0 || shellCfg.shellHopIndex >= tunnel.hops.length) {
+    if (cfg.shellHopIndex == null || cfg.shellHopIndex < 0 || cfg.shellHopIndex >= tunnel.hops.length) {
       alert('Pick a valid hop on which to open the shell.');
       return;
     }
     data.terminalMode = 'shell';
-    data.shellHopIndex = shellCfg.shellHopIndex;
+    data.shellHopIndex = cfg.shellHopIndex;
   } else {
     delete data.terminalMode;
     delete data.shellHopIndex;
+  }
+
+  if (cfg.psqlMode === 'peer') {
+    if (!tunnel.enabled || tunnel.hops.length === 0) {
+      alert('Peer mode requires an enabled SSH tunnel with at least one bastion.');
+      return;
+    }
+    if (cfg.peerHopIndex == null || cfg.peerHopIndex < 0 || cfg.peerHopIndex >= tunnel.hops.length) {
+      alert('Pick a valid hop on which to run psql.');
+      return;
+    }
+    data.psqlMode = 'peer';
+    data.peerHopIndex = cfg.peerHopIndex;
+    if (cfg.peerOsUser) data.peerOsUser = cfg.peerOsUser;
+    data.peerSudo = cfg.peerSudo;
+  } else {
+    delete data.psqlMode;
+    delete data.peerHopIndex;
+    delete data.peerOsUser;
+    delete data.peerSudo;
   }
 
   if (editId) {
     const idx = connections.findIndex((c) => c.id === editId);
     if (idx >= 0) {
       const merged = { ...connections[idx], ...data };
-      // Strip shell-mode fields when not in shell mode (so deletes propagate)
+      // Strip mode-specific fields so deletes propagate to disk.
       if (data.terminalMode !== 'shell') {
         delete merged.terminalMode;
         delete merged.shellHopIndex;
+      }
+      if (data.psqlMode !== 'peer') {
+        delete merged.psqlMode;
+        delete merged.peerHopIndex;
+        delete merged.peerOsUser;
+        delete merged.peerSudo;
       }
       // Drop legacy shell fields that are no longer used.
       delete merged.shellTarget;

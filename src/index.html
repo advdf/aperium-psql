@@ -382,13 +382,41 @@
         </div>
       </fieldset>
 
+      <fieldset id="psql-mode" class="psql-mode-fieldset">
+        <legend>psql connection</legend>
+        <label class="checkbox-label">
+          <input type="radio" name="psql-mode" value="tcp" checked>
+          <span>TCP (host/port, with or without SSH tunnel)</span>
+        </label>
+        <label class="checkbox-label">
+          <input type="radio" name="psql-mode" value="peer">
+          <span>Peer (run psql on the last hop via Unix socket — no TCP, no password)</span>
+        </label>
+      </fieldset>
+      <fieldset id="peer-options" class="hidden">
+        <legend>Peer target</legend>
+        <p class="tunnel-note">Runs <code>psql</code> over SSH on the chosen hop, connecting through the local Unix socket. Host / Port / Password / SSL Mode above are ignored — Database and User (PG role for <code>-U</code>) still apply.</p>
+        <label>
+          Run psql on
+          <select id="peer-hop-index"></select>
+        </label>
+        <label>
+          OS user (peer)
+          <input type="text" id="peer-os-user" placeholder="postgres">
+        </label>
+        <label class="checkbox-label">
+          <input type="checkbox" id="peer-sudo">
+          <span>Use <code>sudo -niu &lt;OS user&gt;</code> to switch user before running psql</span>
+        </label>
+      </fieldset>
+
       <label class="checkbox-label">
         <input type="checkbox" id="terminal-shell" name="terminal-shell">
         <span>Open shell (SH) instead of psql</span>
       </label>
       <fieldset id="shell-options" class="hidden">
         <legend>Shell target</legend>
-        <p class="tunnel-note">Pick the hop on which the interactive SSH shell should open. Useful for legacy VM-hosted databases where you also need shell access (logs, restarts…).</p>
+        <p class="tunnel-note">Pick the hop on which the interactive SSH shell should open. Useful for legacy VM-hosted databases where you also need shell access (logs, restarts…). Overrides the psql connection mode above.</p>
         <label>
           Open shell on
           <select id="shell-hop-index"></select>

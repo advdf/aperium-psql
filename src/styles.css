@@ -1538,15 +1538,20 @@ dialog .radio-label input[type="radio"]:disabled + span {
   opacity: 0.5;
 }
 
-#shell-options {
+#shell-options,
+#peer-options,
+#psql-mode {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 10px 12px 12px;
   margin-top: 10px;
   background: var(--bg);
 }
-#shell-options.hidden { display: none; }
-#shell-options legend {
+#shell-options.hidden,
+#peer-options.hidden { display: none; }
+#shell-options legend,
+#peer-options legend,
+#psql-mode legend {
   padding: 0 6px;
   font-size: 10px;
   font-weight: 600;

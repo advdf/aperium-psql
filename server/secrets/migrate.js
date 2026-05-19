@@ -169,6 +169,26 @@ async function sanitizeConnectionForWrite(c, userId, store) {
   // another user's secret is refused outright.
   delete out.password;
   rejectForeignRef('passwordRef', out.passwordRef, userId);
+
+  // Two orthogonal dimensions, each with its own whitelist.
+  // terminalMode: 'shell' = open an SSH shell on a hop instead of psql.
+  if (out.terminalMode !== 'shell') {
+    delete out.terminalMode;
+    delete out.shellHopIndex;
+  } else if (!Number.isInteger(out.shellHopIndex) || out.shellHopIndex < 0) {
+    delete out.shellHopIndex;
+  }
+  // psqlMode: 'peer' = run psql via Unix socket on a hop instead of TCP.
+  if (out.psqlMode !== 'peer') {
+    delete out.psqlMode;
+    delete out.peerHopIndex;
+    delete out.peerOsUser;
+    delete out.peerSudo;
+  } else {
+    if (!Number.isInteger(out.peerHopIndex) || out.peerHopIndex < 0) delete out.peerHopIndex;
+    if (typeof out.peerOsUser !== 'string' || !out.peerOsUser) delete out.peerOsUser;
+    out.peerSudo = !!out.peerSudo;
+  }
   return out;
 }
 

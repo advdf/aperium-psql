@@ -8,7 +8,7 @@ const { WebSocketServer } = require('ws');
 const pty = require('node-pty');
 const session = require('express-session');
 const PgSession = require('connect-pg-simple')(session);
-const { openTunnelChain, openSshShell } = require('./ssh-tunnel');
+const { openTunnelChain, openSshShell, openSshExec } = require('./ssh-tunnel');
 const { pool, initSchema } = require('./db');
 const { userDataPath, DATA_DIR: USER_DATA_DIR } = require('./dataPath');
 const requireAuth = require('./middleware/requireAuth');
@@ -181,6 +181,43 @@ async function buildPsqlEnv(connection, userId) {
   return env;
 }
 
+// Peer mode: we run `psql` over SSH on a chosen hop. The command is
+// concatenated into a shell string for `client.exec`, so every identifier we
+// inject MUST be on a strict POSIX whitelist — no quoting saves us once a
+// rogue value reaches `sh -c`.
+function safePeerIdent(s, field) {
+  if (typeof s !== 'string' || !/^[a-zA-Z_][a-zA-Z0-9_-]*$/.test(s)) {
+    throw new Error(`peer ${field}: unsafe value ${JSON.stringify(s)} (allowed: ^[a-zA-Z_][a-zA-Z0-9_-]*$)`);
+  }
+  return s;
+}
+
+function buildPeerCommand({ sshUser, peerOsUser, peerSudo, pgUser, database, csv }) {
+  const parts = ['psql', '-w', '--no-psqlrc'];
+  if (csv) parts.push('-X', '--csv');
+  if (pgUser) parts.push('-U', safePeerIdent(pgUser, 'pgUser'));
+  if (database) parts.push('-d', safePeerIdent(database, 'database'));
+  let cmd = parts.join(' ');
+  const needSudo = peerSudo && peerOsUser && peerOsUser !== sshUser;
+  if (needSudo) cmd = `sudo -niu ${safePeerIdent(peerOsUser, 'peerOsUser')} -- ${cmd}`;
+  return cmd;
+}
+
+async function resolvePeerTarget(connection, userId) {
+  const rawHops = connection && connection.tunnel && connection.tunnel.hops;
+  if (!Array.isArray(rawHops) || rawHops.length === 0) {
+    throw new Error('peer mode requires at least one SSH hop');
+  }
+  const hops = await resolveHops(rawHops, userId);
+  const idx = Number.isInteger(connection.peerHopIndex)
+    ? connection.peerHopIndex
+    : hops.length - 1;
+  if (idx < 0 || idx >= hops.length) {
+    throw new Error(`peer hop index out of range: ${idx} (chain has ${hops.length} hop(s))`);
+  }
+  return { hops, targetHopIndex: idx, sshUser: hops[idx].user };
+}
+
 const runningQueries = new Map();
 
 const app = express();
@@ -330,12 +367,106 @@ app.post('/api/backup/import', async (req, res) => {
   }
 });
 
+function buildQueryResponse({ stdout, stderr, code, cancelled, isMeta, duration }) {
+  if (cancelled) return { error: 'Query cancelled', duration, cancelled: true };
+  if (code !== 0) return { error: stderr.trim() || `psql exited with code ${code}`, duration };
+  if (isMeta) {
+    return { isMetacommand: true, raw: stdout, stderr: stderr.trim() || null, duration };
+  }
+  try {
+    const lines = stdout.trim().split('\n');
+    if (lines.length === 0 || !lines[0]) {
+      return { message: stderr || 'Query executed successfully.', duration };
+    }
+    const columns = parseCSVLine(lines[0]);
+    const rows = [];
+    for (let i = 1; i < lines.length; i++) {
+      if (lines[i].trim()) rows.push(parseCSVLine(lines[i]));
+    }
+    return { columns, rows, rowCount: rows.length, duration, notice: stderr || null };
+  } catch {
+    return { message: stdout.trim() || stderr.trim() || 'Done.', duration };
+  }
+}
+
+async function executePeerQuery({ connection, trimmedQuery, isMeta, queryId, userId, startTime, res }) {
+  let target;
+  try { target = await resolvePeerTarget(connection, userId); }
+  catch (err) {
+    log('executeQuery peer setup error:', err.message);
+    return res.json({ error: err.message, duration: Date.now() - startTime });
+  }
+
+  let command;
+  try {
+    command = buildPeerCommand({
+      sshUser: target.sshUser,
+      peerOsUser: connection.peerOsUser,
+      peerSudo: !!connection.peerSudo,
+      pgUser: connection.user,
+      database: connection.database,
+      csv: !isMeta,
+    });
+  } catch (err) {
+    log('executeQuery peer command error:', err.message);
+    return res.json({ error: err.message, duration: Date.now() - startTime });
+  }
+
+  let sshExec;
+  try {
+    sshExec = await openSshExec({ hops: target.hops, targetHopIndex: target.targetHopIndex, command, pty: false });
+  } catch (err) {
+    log('executeQuery peer SSH error:', err.message);
+    return res.json({ error: `SSH: ${err.message}`, duration: Date.now() - startTime });
+  }
+
+  log('executeQuery (peer) hop:', target.targetHopIndex + 1, '/', target.hops.length, 'queryId:', queryId, isMeta ? '(meta)' : '');
+
+  let cancelled = false;
+  let responded = false;
+  if (queryId) runningQueries.set(queryId, { kill: () => { cancelled = true; try { sshExec.close(); } catch {} } });
+
+  let stdout = '';
+  let stderr = '';
+  const respond = (body) => {
+    if (responded) return;
+    responded = true;
+    try { sshExec.close(); } catch {}
+    res.json(body);
+  };
+
+  sshExec.stream.on('data', (c) => { stdout += c.toString(); });
+  sshExec.stream.stderr?.on('data', (c) => { stderr += c.toString(); });
+  sshExec.stream.on('close', (code) => {
+    if (queryId) runningQueries.delete(queryId);
+    respond(buildQueryResponse({
+      stdout, stderr, code: cancelled ? 0 : (code ?? 0), cancelled, isMeta,
+      duration: Date.now() - startTime,
+    }));
+  });
+  sshExec.stream.on('error', (err) => {
+    if (queryId) runningQueries.delete(queryId);
+    respond({ error: err.message, duration: Date.now() - startTime });
+  });
+
+  try { sshExec.stream.end(trimmedQuery + '\n'); } catch {}
+}
+
 app.post('/api/query', async (req, res) => {
   const { connection, query, queryId } = req.body || {};
   if (!connection || !query) return res.status(400).json({ error: 'connection and query are required' });
 
   const userId = req.session.userId;
   const startTime = Date.now();
+  const trimmedQuery = String(query).trim();
+  const isMeta = /(^|\n)\s*\\[a-zA-Z?!+]/.test(trimmedQuery);
+
+  // psqlMode controls how queries reach PostgreSQL — independent of the
+  // shell checkbox, which only affects what the PTY tab spawns.
+  if (connection.psqlMode === 'peer') {
+    return executePeerQuery({ connection, trimmedQuery, isMeta, queryId, userId, startTime, res });
+  }
+
   let tunnel = null;
   let env;
   try {
@@ -351,16 +482,13 @@ app.post('/api/query', async (req, res) => {
     ? { ...connection, host: tunnel.localHost, port: String(tunnel.localPort) }
     : connection;
 
-  const trimmedQuery = String(query).trim();
-  const isMeta = /(^|\n)\s*\\[a-zA-Z?!+]/.test(trimmedQuery);
-
   const args = isMeta
     ? ['--no-psqlrc', '-w', '-P', 'pager=off', '-c', trimmedQuery, ...buildPsqlArgs(effectiveConn)]
     : ['--csv', '--no-psqlrc', '-w', '-c', trimmedQuery, ...buildPsqlArgs(effectiveConn)];
   log('executeQuery host:', connection.host, tunnel ? `(via tunnel -> 127.0.0.1:${tunnel.localPort})` : '', 'queryId:', queryId, isMeta ? '(meta)' : '');
 
   const proc = spawn(findPsqlBin(), args, { env });
-  if (queryId) runningQueries.set(queryId, proc);
+  if (queryId) runningQueries.set(queryId, { kill: () => { try { proc.kill('SIGTERM'); } catch {} } });
 
   let stdout = '';
   let stderr = '';
@@ -383,42 +511,17 @@ app.post('/api/query', async (req, res) => {
 
   proc.on('close', (code, signal) => {
     if (queryId) runningQueries.delete(queryId);
-    const duration = Date.now() - startTime;
-    const cancelled = signal === 'SIGTERM' || signal === 'SIGKILL';
-
-    if (cancelled) return respond({ error: 'Query cancelled', duration, cancelled: true });
-    if (code !== 0) return respond({ error: stderr.trim() || `psql exited with code ${code}`, duration });
-
-    if (isMeta) {
-      return respond({
-        isMetacommand: true,
-        raw: stdout,
-        stderr: stderr.trim() || null,
-        duration,
-      });
-    }
-
-    try {
-      const lines = stdout.trim().split('\n');
-      if (lines.length === 0 || !lines[0]) {
-        return respond({ message: stderr || 'Query executed successfully.', duration });
-      }
-      const columns = parseCSVLine(lines[0]);
-      const rows = [];
-      for (let i = 1; i < lines.length; i++) {
-        if (lines[i].trim()) rows.push(parseCSVLine(lines[i]));
-      }
-      respond({ columns, rows, rowCount: rows.length, duration, notice: stderr || null });
-    } catch {
-      respond({ message: stdout.trim() || stderr.trim() || 'Done.', duration });
-    }
+    respond(buildQueryResponse({
+      stdout, stderr, code, cancelled: signal === 'SIGTERM' || signal === 'SIGKILL', isMeta,
+      duration: Date.now() - startTime,
+    }));
   });
 });
 
 app.delete('/api/query/:id', (req, res) => {
-  const proc = runningQueries.get(req.params.id);
-  if (proc) {
-    try { proc.kill('SIGTERM'); } catch {}
+  const entry = runningQueries.get(req.params.id);
+  if (entry) {
+    try { entry.kill(); } catch {}
     runningQueries.delete(req.params.id);
     log('Query cancelled:', req.params.id);
   }
@@ -431,7 +534,10 @@ app.post('/api/test-connection', async (req, res) => {
 
   const userId = req.session.userId;
   const startTime = Date.now();
-  const isShell = connection.terminalMode === 'shell';
+  const isPeer = connection.psqlMode === 'peer';
+  // Test the more brittle path first: peer exercises SSH + sudo + psql,
+  // shell only SSH. If peer is set, testing shell would hide peer breakage.
+  const isShell = !isPeer && connection.terminalMode === 'shell';
 
   if (isShell) {
     const tunnelCfg = connection.tunnel;
@@ -461,6 +567,51 @@ app.post('/api/test-connection', async (req, res) => {
       message: `SSH shell on hop ${requested + 1}/${resolvedHops.length}`,
       duration: Date.now() - startTime,
     });
+  }
+
+  if (isPeer) {
+    let target;
+    try { target = await resolvePeerTarget(connection, userId); }
+    catch (err) { return res.json({ ok: false, error: err.message, duration: Date.now() - startTime }); }
+
+    let command;
+    try {
+      command = buildPeerCommand({
+        sshUser: target.sshUser,
+        peerOsUser: connection.peerOsUser,
+        peerSudo: !!connection.peerSudo,
+        pgUser: connection.user,
+        database: connection.database,
+        csv: true,
+      });
+    } catch (err) { return res.json({ ok: false, error: err.message, duration: Date.now() - startTime }); }
+
+    let sshExec;
+    try {
+      sshExec = await openSshExec({ hops: target.hops, targetHopIndex: target.targetHopIndex, command, pty: false });
+    } catch (err) {
+      return res.json({ ok: false, error: `SSH: ${err.message}`, duration: Date.now() - startTime });
+    }
+
+    let stderr = '';
+    let responded = false;
+    const respond = (body) => {
+      if (responded) return;
+      responded = true;
+      try { sshExec.close(); } catch {}
+      res.json(body);
+    };
+    sshExec.stream.stderr?.on('data', (c) => { stderr += c.toString(); });
+    sshExec.stream.on('close', (code) => {
+      if (code === 0) {
+        respond({ ok: true, message: `peer psql on hop ${target.targetHopIndex + 1}/${target.hops.length}`, duration: Date.now() - startTime });
+      } else {
+        respond({ ok: false, error: stderr.trim() || `psql exited with code ${code}`, duration: Date.now() - startTime });
+      }
+    });
+    sshExec.stream.on('error', (err) => respond({ ok: false, error: err.message, duration: Date.now() - startTime }));
+    try { sshExec.stream.end('select 1\n'); } catch {}
+    return;
   }
 
   let tunnel = null;
@@ -605,6 +756,48 @@ wss.on('connection', (ws, req) => {
           sshShell.stream.stderr?.on('data', (data) => safeSend(Buffer.from(data)));
           sshShell.stream.on('close', () => {
             safeSend(JSON.stringify({ type: 'exit', exitCode: 0 }));
+            sshShell = null;
+          });
+          safeSend(JSON.stringify({ type: 'ready' }));
+          return;
+        }
+
+        if (connection.psqlMode === 'peer') {
+          let target, command;
+          try {
+            target = await resolvePeerTarget(connection, userId);
+            command = buildPeerCommand({
+              sshUser: target.sshUser,
+              peerOsUser: connection.peerOsUser,
+              peerSudo: !!connection.peerSudo,
+              pgUser: connection.user,
+              database: connection.database,
+              csv: false,
+            });
+          } catch (err) {
+            log('SSH peer config error:', err.message);
+            safeSend(JSON.stringify({ type: 'error', message: err.message }));
+            return;
+          }
+
+          log('SSH peer spawn tabId:', tabId, 'targetHop:', target.targetHopIndex + 1, '/', target.hops.length);
+          try {
+            sshShell = await openSshExec({
+              hops: target.hops,
+              targetHopIndex: target.targetHopIndex,
+              command,
+              pty: { cols: msg.cols || 120, rows: msg.rows || 30, term: 'xterm-256color' },
+            });
+          } catch (err) {
+            log('SSH peer error:', err.message);
+            safeSend(JSON.stringify({ type: 'error', message: `SSH peer: ${err.message}` }));
+            return;
+          }
+
+          sshShell.stream.on('data', (data) => safeSend(Buffer.from(data)));
+          sshShell.stream.stderr?.on('data', (data) => safeSend(Buffer.from(data)));
+          sshShell.stream.on('close', (code) => {
+            safeSend(JSON.stringify({ type: 'exit', exitCode: code ?? 0 }));
             sshShell = null;
           });
           safeSend(JSON.stringify({ type: 'ready' }));
