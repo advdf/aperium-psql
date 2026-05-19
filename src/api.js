@@ -27,7 +27,13 @@
         if (typeof ev.data === 'string') {
           try {
             const msg = JSON.parse(ev.data);
-            if (msg.type === 'exit') ptyExitCb && ptyExitCb({ id: tabId, exitCode: msg.exitCode });
+            if (msg.type === 'exit') {
+              ptyExitCb && ptyExitCb({ id: tabId, exitCode: msg.exitCode });
+            } else if (msg.type === 'error') {
+              const text = `\x1b[31m${msg.message || 'error'}\x1b[0m\r\n`;
+              ptyDataCb && ptyDataCb({ id: tabId, data: new TextEncoder().encode(text) });
+              ptyExitCb && ptyExitCb({ id: tabId, exitCode: 1 });
+            }
           } catch {}
         }
       });

@@ -35,6 +35,11 @@ async function openTunnelChain({ hops, dbHost, dbPort }) {
 
       const client = new Client();
       clients.push(client);
+      // Persistent listener so post-connect errors (keepalive timeout, peer
+      // close, etc.) don't crash the process with an unhandled 'error' event.
+      client.on('error', (err) => {
+        console.log(`[ssh2 hop${i + 1}] post-connect error: ${err.message}`);
+      });
 
       await new Promise((resolve, reject) => {
         const onError = (err) => {
@@ -146,6 +151,9 @@ async function openSshShell({ hops, targetHopIndex, cols = 120, rows = 30, term 
   const connectHop = (cfg, sock) => {
     const client = new Client();
     clients.push(client);
+    client.on('error', (err) => {
+      console.log(`[ssh2 shell] post-connect error: ${err.message}`);
+    });
     return new Promise((resolve, reject) => {
       const onError = (err) => {
         client.removeListener('ready', onReady);
