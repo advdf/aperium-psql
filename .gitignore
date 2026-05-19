@@ -2,6 +2,7 @@ node_modules/
 dist/
 data/
 keys/
+keys.backup-*/
 aperium.log
 CLAUDE.md
 .claude/

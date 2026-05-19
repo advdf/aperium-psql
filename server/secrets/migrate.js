@@ -19,26 +19,6 @@ function rejectForeignRef(field, ref, userId) {
   throw new Error(`refused ${field} scoped to a different user: ${String(ref).slice(0, 60)}…`);
 }
 
-// Reads a private-key file from the local FS for migration into the KMS.
-// Returns `null` if the file is missing / unreadable — callers treat that
-// as "leave the existing privateKeyPath alone, log a warning". This is the
-// same shape as server/index.js#readPrivateKey but non-throwing so a single
-// bad bastion entry doesn't abort the whole boot migration.
-function tryReadKeyFile(p, log) {
-  if (!p) return null;
-  try {
-    const content = fs.readFileSync(p, 'utf-8');
-    if (!content.trim()) {
-      log(`[migrate] key file ${p}: empty, skipping`);
-      return null;
-    }
-    return content;
-  } catch (err) {
-    log(`[migrate] key file ${p}: ${err.code || err.message}, skipping`);
-    return null;
-  }
-}
-
 function isUuidLikeDir(name) {
   // Per-user dirs are named after the postgres UUID PK of aperium.users.
   // Anything that doesn't look like a UUID is skipped (e.g. legacy `pg/`).
@@ -128,26 +108,10 @@ async function migrateBastionsFile(file, userId, store, log) {
       strippedAnyEmpty = true;
     }
 
-    // privateKeyPath → privateKeyRef (reads the file content into the KMS,
-    // then drops the path field). The file on the host stays put — the
-    // operator deletes it manually once they've confirmed the migration.
-    if (typeof b.privateKeyPath === 'string' && b.privateKeyPath.length > 0 && !looksLikeRef(b.privateKeyRef)) {
-      const content = tryReadKeyFile(b.privateKeyPath, log);
-      if (content) {
-        try {
-          const ref = await store.put(`bastions/${userId}/${b.id || 'unknown'}`, 'privateKey', content);
-          b.privateKeyRef = ref;
-          log(`[migrate] bastion ${b.id || '?'} privateKeyPath ${b.privateKeyPath} → KMS`);
-          delete b.privateKeyPath;
-          touched = true;
-        } catch (err) {
-          log(`[migrate] bastion ${b.id || '?'} privateKeyPath upload: ${err.message}`);
-          throw err;
-        }
-      }
-      // else: file unreadable — leave privateKeyPath untouched so the
-      // bastion still works against the legacy file-on-disk code path
-      // and the operator gets a chance to fix the mount.
+    // Stale privateKeyPath fields are stripped (disk-key support removed).
+    if ('privateKeyPath' in b) {
+      delete b.privateKeyPath;
+      strippedAnyEmpty = true;
     }
 
     if (touched) migrated++; else skipped++;
@@ -218,19 +182,8 @@ async function sanitizeBastionForWrite(b, userId, store, log = () => {}) {
     out.privateKeyRef = await store.put(`bastions/${userId}/${out.id || 'unknown'}`, 'privateKey', out.privateKey);
   }
   delete out.privateKey;
-  // privateKeyPath → privateKeyRef: read the file content on save and
-  // push it to the KMS, then drop the path field so the bastion record
-  // ends up ref-only.
-  if (typeof out.privateKeyPath === 'string' && out.privateKeyPath.length > 0 && !looksLikeRef(out.privateKeyRef)) {
-    const content = tryReadKeyFile(out.privateKeyPath, log);
-    if (content) {
-      out.privateKeyRef = await store.put(`bastions/${userId}/${out.id || 'unknown'}`, 'privateKey', content);
-      log(`[secrets] bastion ${out.id || '?'} privateKeyPath ${out.privateKeyPath} → KMS`);
-      delete out.privateKeyPath;
-    }
-    // else: leave the path so the request still resolves at tunnel-open
-    // time; operator can fix the mount and re-save.
-  }
+  // Disk-key support has been removed: never persist privateKeyPath.
+  delete out.privateKeyPath;
   // Cross-tenant guard: any *Ref still on the record at this point must
   // belong to this user (forged refs from a malicious client are refused).
   rejectForeignRef('passphraseRef', out.passphraseRef, userId);
