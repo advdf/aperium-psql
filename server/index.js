@@ -24,6 +24,7 @@ const {
   runUserMigration,
   sanitizeConnectionForWrite,
   sanitizeBastionForWrite,
+  dedupBastionKeys,
   deleteOrphanedRefs,
 } = require('./secrets/migrate');
 const {
@@ -37,6 +38,22 @@ function loadBastions(userId) {
   const file = userDataPath(userId, 'bastions.json');
   try { return JSON.parse(fs.readFileSync(file, 'utf-8')); }
   catch { return []; }
+}
+
+// Per-user mapping of SHA-256(key content) → display name. Lets the
+// operator give a memorable label ("support@chabichou") to a key that
+// is referenced by N bastions through N independent refs. Storage is a
+// flat JSON object on disk; the hash is opaque to the client.
+function loadKeyNames(userId) {
+  const file = userDataPath(userId, 'keys.json');
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch { return {}; }
+}
+function saveKeyNames(userId, map) {
+  const file = userDataPath(userId, 'keys.json');
+  fs.writeFileSync(file, JSON.stringify(map, null, 2));
 }
 
 async function resolveBastionCreds(source, ctx, userId) {
@@ -297,6 +314,69 @@ app.get('/api/bastions', (req, res) => {
   res.json(loadBastions(req.session.userId));
 });
 
+// List the user's distinct private keys, deduplicated by SHA-256 of the
+// raw content stored in the KMS. Used by the bastion editor to offer
+// "reuse a key" instead of forcing the operator to upload the same file
+// for every bastion that authenticates with the same identity. Each
+// entry exposes ONE existing `privateKeyRef` (the first bastion's) so
+// the new bastion can just point at it — refs are safe to share across
+// the same user's bastions (cross-tenant guard only checks userId).
+//
+// We never return the key bytes themselves. The hash is opaque to the
+// client; bastion names let the operator recognise which group of
+// bastions a key belongs to.
+app.get('/api/bastion-keys', async (req, res) => {
+  const userId = req.session.userId;
+  const bastions = loadBastions(userId);
+  const names = loadKeyNames(userId);
+  const store = getSecretStore();
+  const byHash = new Map();
+  for (const b of bastions) {
+    if (typeof b.privateKeyRef !== 'string') continue;
+    if (!refBelongsTo(b.privateKeyRef, userId)) continue;
+    let content;
+    try { content = await store.get(b.privateKeyRef); }
+    catch (err) {
+      log('GET /api/bastion-keys: skipping', b.privateKeyRef.slice(0, 40), err.message);
+      continue;
+    }
+    const hash = crypto.createHash('sha256').update(content).digest('hex');
+    let entry = byHash.get(hash);
+    if (!entry) {
+      entry = {
+        id: hash,
+        name: typeof names[hash] === 'string' ? names[hash] : '',
+        privateKeyRef: b.privateKeyRef,
+        passphraseRef: typeof b.passphraseRef === 'string' ? b.passphraseRef : null,
+        bastionIds: [],
+        bastionNames: [],
+      };
+      byHash.set(hash, entry);
+    }
+    entry.bastionIds.push(b.id);
+    entry.bastionNames.push(b.name || b.host || b.id);
+  }
+  res.json([...byHash.values()]);
+});
+
+// Rename a key (or clear its name with an empty string). The hash
+// itself is the identifier — clients receive it from
+// GET /api/bastion-keys. We don't verify the hash actually matches a
+// resolvable key on disk: orphan entries cost nothing and may resync
+// after a future upload.
+app.patch('/api/bastion-keys/:hash', (req, res) => {
+  const userId = req.session.userId;
+  const { hash } = req.params;
+  if (!/^[0-9a-f]{64}$/.test(hash)) {
+    return res.status(400).json({ error: 'hash must be a 64-char hex SHA-256' });
+  }
+  const name = req.body && typeof req.body.name === 'string' ? req.body.name.trim() : '';
+  const names = loadKeyNames(userId);
+  if (name) names[hash] = name; else delete names[hash];
+  saveKeyNames(userId, names);
+  res.json({ ok: true });
+});
+
 app.get('/api/psql-meta', (_req, res) => {
   res.type('application/json').sendFile(path.join(__dirname, 'psql-meta.json'));
 });
@@ -308,6 +388,11 @@ app.put('/api/bastions', async (req, res) => {
   const store = getSecretStore();
   try {
     const oldList = loadBastions(userId);
+    // Collapse fresh uploads and existing duplicate refs to one canonical
+    // ref per distinct key content BEFORE sanitize so we don't multiply
+    // KMS entries. `deleteOrphanedRefs` at the end will then prune the
+    // refs that are no longer referenced by any bastion.
+    await dedupBastionKeys(req.body, oldList, userId, store, log);
     const sanitized = [];
     for (const b of req.body) sanitized.push(await sanitizeBastionForWrite(b, userId, store, log));
     fs.writeFileSync(file, JSON.stringify(sanitized, null, 2));
