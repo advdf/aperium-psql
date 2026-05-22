@@ -313,6 +313,22 @@
         body: JSON.stringify(bastions),
       }).then((r) => r.json()),
 
+    // Distinct keys stored in the KMS for this user, deduplicated by raw
+    // content. Each entry carries one usable `privateKeyRef` (and the
+    // matching `passphraseRef` if any), the names of the bastions
+    // already pointing at the same key, and an operator-chosen display
+    // name. Used to populate the "reuse a key" picker and the Keys
+    // management view.
+    listBastionKeys: () => fetch('/api/bastion-keys').then((r) => r.json()),
+    // Rename a key (or clear its name with ''). The hash is what
+    // GET /api/bastion-keys returns as `id`.
+    renameBastionKey: (hash, name) =>
+      fetch(`/api/bastion-keys/${encodeURIComponent(hash)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      }).then((r) => r.json()),
+
     // Encrypted backup export / import. The export endpoint resolves every
     // `*Ref` against the KMS and returns an AES-256-GCM envelope; the
     // import endpoint decrypts, re-pushes each secret to the local KMS,

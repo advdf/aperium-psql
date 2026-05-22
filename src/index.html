@@ -216,6 +216,10 @@
 
   <!-- Bastions manager dialog -->
   <dialog id="bastions-dialog" class="bastions-dialog">
+    <nav class="bastions-tabs">
+      <button type="button" class="bastions-tab" data-tab="list">Bastions</button>
+      <button type="button" class="bastions-tab" data-tab="keys">Keys</button>
+    </nav>
     <!-- List view -->
     <section class="bastions-view" data-view="list">
       <h3>SSH bastions</h3>
@@ -240,6 +244,31 @@
         <span class="dialog-spacer"></span>
         <button type="button" id="btn-bastion-cancel">Cancel</button>
         <button type="button" id="btn-bastion-save">Save</button>
+      </div>
+    </section>
+
+    <!-- Keys list view -->
+    <section class="bastions-view hidden" data-view="keys">
+      <h3>Stored keys</h3>
+      <p class="bastions-hint">Distinct private keys held in the KMS, deduplicated by content. Click an entry to rename it or see every bastion that uses it.</p>
+      <div id="keys-list-view"></div>
+      <div class="dialog-actions">
+        <span class="dialog-spacer"></span>
+        <button type="button" id="btn-keys-close">Close</button>
+      </div>
+    </section>
+
+    <!-- Key detail view -->
+    <section class="bastions-view hidden" data-view="key-detail">
+      <header class="bastion-detail-header">
+        <button type="button" id="btn-key-back" class="bastion-back" title="Back to keys">&larr;</button>
+        <h3 id="key-detail-title">Edit key</h3>
+      </header>
+      <div id="key-detail-form"></div>
+      <div class="dialog-actions">
+        <span class="dialog-spacer"></span>
+        <button type="button" id="btn-key-cancel">Cancel</button>
+        <button type="button" id="btn-key-save">Save name</button>
       </div>
     </section>
   </dialog>

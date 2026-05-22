@@ -5,6 +5,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 const { getSecretStore, looksLikeRef, refBelongsTo } = require('./index');
 
@@ -211,6 +212,83 @@ async function sanitizeBastionForWrite(b, userId, store, log = () => {}) {
   return out;
 }
 
+// Deduplicate private keys across the inbound bastion list and any keys
+// already in the KMS for this user. Rewrites `bastions` IN PLACE so the
+// subsequent sanitize pass sees only canonical refs.
+//
+// Rules:
+//   - A fresh upload (`b.privateKey` carries raw PEM text) whose
+//     SHA-256 hash matches a ref already in the KMS is REPLACED by the
+//     existing canonical ref; the raw upload is dropped so sanitize
+//     doesn't create a second KMS entry for the same bytes.
+//   - When the hash is new, we `store.put` the bytes ourselves so the
+//     freshly-created ref can serve as the canonical for any sibling
+//     entry in the same payload that uploads the same key.
+//   - An existing `b.privateKeyRef` whose resolved content matches a
+//     canonical ref (the first ref seen for that hash, taken from the
+//     OLD on-disk list to maximise stability of identifiers) is
+//     rewritten to the canonical ref. `deleteOrphanedRefs` then prunes
+//     the now-unused dupes at the end of the PUT flow.
+//
+// Best-effort: KMS resolution failures are logged and the affected ref
+// is left alone. Refs scoped to other users are skipped entirely.
+async function dedupBastionKeys(bastions, oldList, userId, store, log = () => {}) {
+  const hashByRef = new Map();
+  const canonByHash = new Map();
+
+  for (const old of oldList) {
+    const ref = old && old.privateKeyRef;
+    if (typeof ref !== 'string') continue;
+    if (!refBelongsTo(ref, userId)) continue;
+    if (hashByRef.has(ref)) continue;
+    try {
+      const content = await store.get(ref);
+      const h = crypto.createHash('sha256').update(content).digest('hex');
+      hashByRef.set(ref, h);
+      if (!canonByHash.has(h)) canonByHash.set(h, ref);
+    } catch (err) {
+      log(`[dedup] could not resolve ${ref.slice(0, 40)}: ${err.message}`);
+    }
+  }
+
+  for (const b of bastions) {
+    if (!b || typeof b !== 'object') continue;
+
+    if (typeof b.privateKey === 'string' && b.privateKey.length > 0 && !looksLikeRef(b.privateKey)) {
+      const h = crypto.createHash('sha256').update(b.privateKey).digest('hex');
+      if (!canonByHash.has(h)) {
+        const newRef = await store.put(`bastions/${userId}/${b.id || 'unknown'}`, 'privateKey', b.privateKey);
+        canonByHash.set(h, newRef);
+        hashByRef.set(newRef, h);
+      }
+      b.privateKeyRef = canonByHash.get(h);
+      delete b.privateKey;
+      continue;
+    }
+
+    if (typeof b.privateKeyRef !== 'string') continue;
+    if (!refBelongsTo(b.privateKeyRef, userId)) continue;
+    let h = hashByRef.get(b.privateKeyRef);
+    if (!h) {
+      // Ref isn't in the old list (e.g. the client supplied a ref
+      // borrowed from another bastion via the reuse picker before the
+      // server-side list refreshed). Resolve it now so we can still
+      // canonicalize.
+      try {
+        const content = await store.get(b.privateKeyRef);
+        h = crypto.createHash('sha256').update(content).digest('hex');
+        hashByRef.set(b.privateKeyRef, h);
+        if (!canonByHash.has(h)) canonByHash.set(h, b.privateKeyRef);
+      } catch (err) {
+        log(`[dedup] could not resolve inbound ${b.privateKeyRef.slice(0, 40)}: ${err.message}`);
+        continue;
+      }
+    }
+    const can = canonByHash.get(h);
+    if (can && can !== b.privateKeyRef) b.privateKeyRef = can;
+  }
+}
+
 // Best-effort cleanup of orphaned refs when a record is replaced/deleted.
 async function deleteOrphanedRefs(oldList, newList, refFields, store, log) {
   const stillUsed = new Set();
@@ -235,5 +313,6 @@ module.exports = {
   migrateForUser,
   sanitizeConnectionForWrite,
   sanitizeBastionForWrite,
+  dedupBastionKeys,
   deleteOrphanedRefs,
 };

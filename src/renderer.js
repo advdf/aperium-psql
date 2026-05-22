@@ -2007,11 +2007,43 @@ async function loadBastionsCache() {
   return bastionsCache;
 }
 
+// Distinct keys, populated lazily before the bastion detail form
+// renders so the "reuse a key" picker has something to show. The list
+// is fetched per dialog-open: refresh cost is bounded by the user's
+// bastion count and keeps the picker accurate after a save.
+let bastionKeysCache = [];
+
+async function loadBastionKeysCache() {
+  try {
+    const list = await window.api.listBastionKeys();
+    bastionKeysCache = Array.isArray(list) ? list : [];
+  } catch {
+    bastionKeysCache = [];
+  }
+  return bastionKeysCache;
+}
+
 function bastionSummary(b) {
   const host = b.host || '?';
   const user = b.user || '?';
   const port = b.port ? `:${b.port}` : '';
   return `${b.name || host} (${user}@${host}${port})`;
+}
+
+// Build the option text shown in the "reuse a key" picker. Each entry
+// is a distinct key (deduplicated server-side by raw content). If the
+// operator has named the key, that wins — otherwise we fall back to
+// listing the bastions that already point at it so the key is still
+// recognisable.
+function formatKeyOptionLabel(entry) {
+  const names = Array.isArray(entry.bastionNames) ? entry.bastionNames : [];
+  const count = names.length;
+  if (entry.name) {
+    return `${entry.name} (${count} ${count === 1 ? 'bastion' : 'bastions'})`;
+  }
+  if (count === 0) return 'unused key';
+  if (count <= 3) return names.join(', ');
+  return `${names.slice(0, 2).join(', ')} +${count - 2} more`;
 }
 
 // ---- SSH tunnel form helpers (connection dialog) ----
@@ -2312,6 +2344,13 @@ const btnBastionBack = document.getElementById('btn-bastion-back');
 const btnBastionCancel = document.getElementById('btn-bastion-cancel');
 const btnBastionSave = document.getElementById('btn-bastion-save');
 const btnBastionDelete = document.getElementById('btn-bastion-delete');
+const keysListView = document.getElementById('keys-list-view');
+const keyDetailForm = document.getElementById('key-detail-form');
+const keyDetailTitle = document.getElementById('key-detail-title');
+const btnKeysClose = document.getElementById('btn-keys-close');
+const btnKeyBack = document.getElementById('btn-key-back');
+const btnKeyCancel = document.getElementById('btn-key-cancel');
+const btnKeySave = document.getElementById('btn-key-save');
 
 // Which bastion is being edited in the detail view (id string), or the special
 // sentinel '__new__' for an unsaved new entry. null when list view is active.
@@ -2321,6 +2360,19 @@ function showBastionsView(view) {
   bastionsDialog.querySelectorAll('.bastions-view').forEach((s) => {
     s.classList.toggle('hidden', s.dataset.view !== view);
   });
+  // Tabs are only relevant on the two top-level views ('list' for
+  // bastions, 'keys' for stored keys). Detail views own the full
+  // surface so an accidental tab click doesn't lose pending edits.
+  const topLevel = view === 'list' || view === 'keys';
+  const tabBar = bastionsDialog.querySelector('.bastions-tabs');
+  if (tabBar) {
+    tabBar.classList.toggle('hidden', !topLevel);
+    if (topLevel) {
+      tabBar.querySelectorAll('.bastions-tab').forEach((t) => {
+        t.classList.toggle('active', t.dataset.tab === view);
+      });
+    }
+  }
 }
 
 function bastionSummaryLine(b) {
@@ -2359,7 +2411,39 @@ function renderBastionsListView() {
 
 function renderBastionDetailForm(b) {
   const hasRef = typeof b.privateKeyRef === 'string' && b.privateKeyRef.startsWith('openbao:');
-  const currentLabel = hasRef ? 'stored in the KMS' : '— none —';
+
+  // Identify the key entry this bastion currently points at, so we can
+  // pre-select it in the picker and label "Currently:" with something
+  // recognisable (the operator-chosen name or the bastion group). The
+  // membership check uses bastionIds because the server picks one ref
+  // as the canonical for each group; comparing refs alone would miss
+  // bastions that haven't yet been collapsed onto the canonical ref.
+  const currentEntry = (bastionKeysCache || []).find(
+    (k) => Array.isArray(k.bastionIds) && k.bastionIds.includes(b.id),
+  );
+  const currentLabel = !hasRef
+    ? '— none —'
+    : currentEntry
+      ? (currentEntry.name || formatKeyOptionLabel(currentEntry))
+      : 'stored in the KMS';
+
+  // All distinct keys held in the KMS. We deliberately keep the current
+  // key in the list (pre-selected below) so the operator can see which
+  // key the bastion is using without scrolling between Currently: and
+  // the picker. Picking the same entry is a no-op handled below.
+  const reuseCandidates = (bastionKeysCache || [])
+    .slice()
+    .sort((a, c) => (a.bastionNames?.[0] || '').localeCompare(c.bastionNames?.[0] || ''));
+
+  const reusePickerHtml = reuseCandidates.length ? `
+        <div class="bastion-key-picker">
+          <label>Or reuse a key already stored in the KMS:
+            <select class="bastion-key-reuse-select">
+              <option value="">— pick a key —</option>
+            </select>
+          </label>
+        </div>
+  ` : '';
 
   bastionDetailForm.innerHTML = `
     <div class="bastion-detail-fields">
@@ -2376,6 +2460,7 @@ function renderBastionDetailForm(b) {
           <button type="button" class="bastion-key-upload-btn">Upload key from disk…</button>
           <span class="bastion-key-upload-status"></span>
         </div>
+${reusePickerHtml}
       </div>
 
       <label>Passphrase (optional)
@@ -2388,12 +2473,27 @@ function renderBastionDetailForm(b) {
   bastionDetailForm.querySelector('[data-field=port]').value = b.port != null ? String(b.port) : '22';
   bastionDetailForm.querySelector('[data-field=user]').value = b.user || '';
   bastionDetailForm.querySelector('[data-field=passphrase]').value = b.passphrase || '';
-  bastionDetailForm.querySelector('.bastion-key-current-value').textContent = currentLabel;
+  const currentValueEl = bastionDetailForm.querySelector('.bastion-key-current-value');
+  currentValueEl.textContent = currentLabel;
+
+  const reuseSelect = bastionDetailForm.querySelector('.bastion-key-reuse-select');
+  if (reuseSelect) {
+    for (const cand of reuseCandidates) {
+      const opt = document.createElement('option');
+      opt.value = cand.id;
+      const label = formatKeyOptionLabel(cand);
+      opt.textContent = cand === currentEntry ? `${label} — current` : label;
+      reuseSelect.appendChild(opt);
+    }
+    if (currentEntry) reuseSelect.value = currentEntry.id;
+  }
 
   bastionDetailForm.dataset.id = b.id;
   bastionDetailForm.dataset.hasRef = String(hasRef);
   bastionDetailForm.dataset.uploadedKey = '';
   bastionDetailForm.dataset.uploadedName = '';
+  bastionDetailForm.dataset.reusedKeyRef = '';
+  bastionDetailForm.dataset.reusedPassphraseRef = '';
 
   const uploadBtn = bastionDetailForm.querySelector('.bastion-key-upload-btn');
   const uploadStatus = bastionDetailForm.querySelector('.bastion-key-upload-status');
@@ -2413,6 +2513,10 @@ function renderBastionDetailForm(b) {
         }
         bastionDetailForm.dataset.uploadedKey = text;
         bastionDetailForm.dataset.uploadedName = file.name;
+        // A fresh upload overrides any previously picked reuse.
+        bastionDetailForm.dataset.reusedKeyRef = '';
+        bastionDetailForm.dataset.reusedPassphraseRef = '';
+        if (reuseSelect) reuseSelect.value = '';
         uploadStatus.textContent = `✓ ${file.name} (${text.length} chars) ready — saves to the KMS on submit`;
         uploadStatus.className = 'bastion-key-upload-status status-ok';
       } catch (err) {
@@ -2422,6 +2526,32 @@ function renderBastionDetailForm(b) {
     });
     input.click();
   });
+
+  if (reuseSelect) {
+    reuseSelect.addEventListener('change', () => {
+      const chosen = (bastionKeysCache || []).find((x) => x.id === reuseSelect.value);
+      // Empty pick, or picking the entry the bastion already uses, is
+      // a no-op: clear the reuse state so btnBastionSave's carry-over
+      // path takes over and we don't gratuitously rewrite the ref to
+      // the canonical (which may differ from the bastion's current ref
+      // until the next dedup pass).
+      if (!chosen || chosen === currentEntry) {
+        bastionDetailForm.dataset.reusedKeyRef = '';
+        bastionDetailForm.dataset.reusedPassphraseRef = '';
+        currentValueEl.textContent = currentLabel;
+        return;
+      }
+      bastionDetailForm.dataset.reusedKeyRef = chosen.privateKeyRef;
+      bastionDetailForm.dataset.reusedPassphraseRef =
+        typeof chosen.passphraseRef === 'string' ? chosen.passphraseRef : '';
+      // Picking a key supersedes any pending upload.
+      bastionDetailForm.dataset.uploadedKey = '';
+      bastionDetailForm.dataset.uploadedName = '';
+      uploadStatus.textContent = '';
+      uploadStatus.className = 'bastion-key-upload-status';
+      currentValueEl.textContent = `reusing key (${formatKeyOptionLabel(chosen)})`;
+    });
+  }
 
   bastionDetailForm.querySelector('[data-field=name]').focus();
 }
@@ -2435,16 +2565,28 @@ function readBastionDetailForm() {
     user: bastionDetailForm.querySelector('[data-field=user]').value.trim(),
     passphrase: bastionDetailForm.querySelector('[data-field=passphrase]').value,
   };
-  // The only key source is a fresh upload from the operator's machine.
-  // If nothing was uploaded, the server keeps the existing privateKeyRef
-  // untouched (carried on the cached bastion record and re-sent via the
-  // merge in btnBastionSave).
+  // Three mutually exclusive sources for the key, in precedence order:
+  //  1. A fresh upload — server creates a new KMS ref for this bastion.
+  //  2. A reuse pick   — point at another bastion's existing ref (the
+  //                       cross-tenant guard only checks the userId
+  //                       segment, so refs are safe to share across this
+  //                       user's bastions).
+  //  3. Neither        — btnBastionSave below carries over the bastion's
+  //                       own existing privateKeyRef so a save without
+  //                       touching the key doesn't wipe it.
   const uploaded = bastionDetailForm.dataset.uploadedKey || '';
-  if (uploaded) b.privateKey = uploaded;
+  const reusedKeyRef = bastionDetailForm.dataset.reusedKeyRef || '';
+  const reusedPassphraseRef = bastionDetailForm.dataset.reusedPassphraseRef || '';
+  if (uploaded) {
+    b.privateKey = uploaded;
+  } else if (reusedKeyRef) {
+    b.privateKeyRef = reusedKeyRef;
+    if (reusedPassphraseRef) b.passphraseRef = reusedPassphraseRef;
+  }
   return b;
 }
 
-function openBastionDetail(id) {
+async function openBastionDetail(id) {
   let b, isNew = false;
   if (id === '__new__') {
     b = { id: crypto.randomUUID(), name: '', host: '', port: '22', user: '', passphrase: '' };
@@ -2457,6 +2599,9 @@ function openBastionDetail(id) {
   bastionDetailForm.dataset.isNew = String(isNew);
   bastionDetailTitle.textContent = isNew ? 'New bastion' : 'Edit bastion';
   btnBastionDelete.style.display = isNew ? 'none' : '';
+  // Refresh the dedup-by-content keys list before rendering so the
+  // "reuse a key" picker reflects what the KMS currently holds.
+  await loadBastionKeysCache();
   renderBastionDetailForm(b);
   showBastionsView('detail');
 }
@@ -2525,16 +2670,17 @@ btnBastionSave.addEventListener('click', async () => {
   if (!b.name) { alert('Name is required.'); return; }
   if (!b.host || !b.user) { alert('Host and user are required.'); return; }
 
-  // Carry over an existing privateKeyRef when the form didn't supply a
-  // fresh uploaded key. Without this, re-saving a bastion without
-  // touching the key would wipe its ref.
+  // Carry over an existing privateKeyRef only when the form supplied
+  // neither a fresh upload nor a reuse pick. Without this, re-saving a
+  // bastion without touching the key would wipe its ref — but skipping
+  // it when a reuse is set would also clobber the picked ref.
   const existing = bastionsCache.find((x) => x.id === b.id);
-  if (!b.privateKey && existing && typeof existing.privateKeyRef === 'string') {
+  if (!b.privateKey && !b.privateKeyRef && existing && typeof existing.privateKeyRef === 'string') {
     b.privateKeyRef = existing.privateKeyRef;
   }
 
   if (!b.privateKey && !b.privateKeyRef) {
-    alert('A private key is required. Upload one from your machine.');
+    alert('A private key is required. Upload one from your machine or reuse one from another bastion.');
     return;
   }
   const isNew = bastionDetailForm.dataset.isNew === 'true';
@@ -2558,6 +2704,126 @@ btnBastionDelete.addEventListener('click', async () => {
   bastionsCache = bastionsCache.filter((x) => x.id !== id);
   await persistBastions();
   exitBastionDetail();
+});
+
+// ---- Stored keys view (second tab of the bastions dialog) ----
+
+// Render the keys list. One row per distinct key (deduplicated server
+// side by content hash), with the operator-chosen name and a count of
+// bastions using it. Clicking a row opens the key detail view.
+function renderKeysListView() {
+  keysListView.innerHTML = '';
+  if (!bastionKeysCache.length) {
+    const empty = document.createElement('p');
+    empty.className = 'bastions-empty';
+    empty.textContent = '— no keys uploaded yet —';
+    keysListView.appendChild(empty);
+    return;
+  }
+  const sorted = [...bastionKeysCache].sort((a, b) => {
+    // Named keys first, then by bastion count desc, then alphabetical by
+    // first bastion name. Keeps the operator's "support@chabichou" at
+    // the top once they've labelled it.
+    if (Boolean(a.name) !== Boolean(b.name)) return a.name ? -1 : 1;
+    const ca = a.bastionIds?.length || 0;
+    const cb = b.bastionIds?.length || 0;
+    if (ca !== cb) return cb - ca;
+    return (a.bastionNames?.[0] || '').localeCompare(b.bastionNames?.[0] || '');
+  });
+  for (const k of sorted) {
+    const row = document.createElement('div');
+    row.className = 'key-row';
+    const count = (k.bastionIds && k.bastionIds.length) || 0;
+    const nameSpan = document.createElement('div');
+    nameSpan.className = k.name ? 'key-row-name' : 'key-row-name unnamed';
+    nameSpan.textContent = k.name || '— unnamed key —';
+    const meta = document.createElement('div');
+    meta.className = 'key-row-meta';
+    meta.textContent = `${count} ${count === 1 ? 'bastion' : 'bastions'} · ${k.id.slice(0, 12)}…`;
+    row.appendChild(nameSpan);
+    row.appendChild(meta);
+    row.addEventListener('click', () => openKeyDetail(k.id));
+    keysListView.appendChild(row);
+  }
+}
+
+// Detail view: shows the operator-chosen name (editable) and the list
+// of bastions that point at the same key bytes.
+function openKeyDetail(hash) {
+  const entry = bastionKeysCache.find((x) => x.id === hash);
+  if (!entry) return;
+  renderKeyDetailForm(entry);
+  showBastionsView('key-detail');
+}
+
+function renderKeyDetailForm(entry) {
+  keyDetailTitle.textContent = entry.name || '— unnamed key —';
+  keyDetailForm.dataset.id = entry.id;
+  const count = (entry.bastionIds && entry.bastionIds.length) || 0;
+  keyDetailForm.innerHTML = `
+    <div class="bastion-detail-fields">
+      <label>Name <input type="text" data-field="key-name" placeholder="e.g. support@chabichou"></label>
+      <p class="bastions-hint">Pick a memorable label. The hash and the underlying KMS ref are unchanged — renaming is purely cosmetic.</p>
+      <div>
+        <span class="bastion-key-label">Used by ${count} ${count === 1 ? 'bastion' : 'bastions'}</span>
+        <ul class="key-detail-bastions" id="key-detail-bastion-list"></ul>
+      </div>
+    </div>
+  `;
+  keyDetailForm.querySelector('[data-field=key-name]').value = entry.name || '';
+  const list = keyDetailForm.querySelector('#key-detail-bastion-list');
+  const names = Array.isArray(entry.bastionNames) ? entry.bastionNames : [];
+  for (const name of names) {
+    const li = document.createElement('li');
+    li.textContent = name;
+    list.appendChild(li);
+  }
+  keyDetailForm.querySelector('[data-field=key-name]').focus();
+}
+
+async function refreshKeysAndShowList() {
+  await loadBastionKeysCache();
+  renderKeysListView();
+  showBastionsView('keys');
+}
+
+// Tab clicks: switch between the two top-level views. Always force a
+// fresh load when switching to keys so the count/names are up-to-date
+// after a bastion add/rename/delete.
+bastionsDialog.querySelectorAll('.bastions-tab').forEach((tab) => {
+  tab.addEventListener('click', async () => {
+    const dest = tab.dataset.tab;
+    if (dest === 'keys') {
+      await refreshKeysAndShowList();
+    } else {
+      await loadBastionsCache();
+      renderBastionsListView();
+      showBastionsView('list');
+    }
+  });
+});
+
+btnKeyBack.addEventListener('click', () => {
+  renderKeysListView();
+  showBastionsView('keys');
+});
+btnKeyCancel.addEventListener('click', () => {
+  renderKeysListView();
+  showBastionsView('keys');
+});
+btnKeysClose.addEventListener('click', () => bastionsDialog.close());
+
+btnKeySave.addEventListener('click', async () => {
+  const hash = keyDetailForm.dataset.id;
+  const name = keyDetailForm.querySelector('[data-field=key-name]').value.trim();
+  if (!hash) return;
+  try {
+    await window.api.renameBastionKey(hash, name);
+  } catch (err) {
+    alert(`Failed to save: ${err.message}`);
+    return;
+  }
+  await refreshKeysAndShowList();
 });
 
 // ---- Backup / restore (encrypted, server-side) ----
