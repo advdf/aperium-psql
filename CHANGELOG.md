@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased — OpenBao 2.7: raft storage + backup round-trip script
+
+- The bundled OpenBao sidecar now uses **integrated (raft) storage**
+  (single node). OpenBao v2.7.0 removed the `file` backend, so
+  `openbao/openbao:latest` no longer started with the shipped
+  `scripts/openbao/config.hcl` (`unknown storage type file`). Also drops
+  the unsupported `disable_mlock` setting.
+- New one-shot `openbao-perms` compose service chowns the `openbao-data`
+  and `openbao-state` volumes to the image's unprivileged `openbao` user
+  before the server starts (named volumes are created root-owned, which
+  made raft fail with `permission denied` on `vault.db`).
+- **Upgrade note:** an existing `file`-backed `openbao-data` volume is not
+  read by raft. Export from the UI (Backup & restore) before upgrading, or
+  run `bao operator migrate` on OpenBao ≤ 2.6, then re-import.
+- New `scripts/backup-roundtrip.js`: writes an encrypted export to
+  `<data>/exports/` and verifies it by decrypting it, importing it into a
+  throwaway user, comparing every field and secret with the original, then
+  cleaning up. Run with
+  `BACKUP_PASSPHRASE=… docker compose exec -T -e BACKUP_PASSPHRASE aperium node - <user-id> < scripts/backup-roundtrip.js`.
+
 ## Unreleased — CI: publish Docker image to GHCR
 
 - New GitHub Actions workflow `.github/workflows/docker-publish.yml`

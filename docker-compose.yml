@@ -125,7 +125,21 @@ services:
       - internal
     restart: "no"
 
-  # OpenBao with persistent file storage and auto-init/unseal. The unseal
+  # One-shot: named volumes are created root-owned, but the openbao image runs
+  # as the unprivileged `openbao` user. Hand both volumes over before the
+  # server starts so raft storage and init.sh can write to them.
+  openbao-perms:
+    image: openbao/openbao:latest
+    container_name: aperium-openbao-perms
+    user: "0:0"
+    entrypoint: ["chown", "-R", "openbao:openbao", "/openbao/data", "/openbao/state"]
+    volumes:
+      - openbao-data:/openbao/data
+      - openbao-state:/openbao/state
+    network_mode: none
+    restart: "no"
+
+  # OpenBao with persistent raft storage and auto-init/unseal. The unseal
   # key + root token live on the openbao-state volume — fine for a dev
   # install, NOT for production (see docs/kms.md). The init.sh wrapper
   # script handles first-boot init and every-boot unseal so the container
@@ -133,6 +147,9 @@ services:
   openbao:
     image: openbao/openbao:latest
     container_name: aperium-openbao
+    depends_on:
+      openbao-perms:
+        condition: service_completed_successfully
     entrypoint:
       - /bin/sh
       - /openbao/scripts/init.sh

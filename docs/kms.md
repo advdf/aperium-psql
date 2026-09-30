@@ -50,14 +50,14 @@ fatal at boot.
 
 ## 2. Dev sidecar (the shipped compose)
 
-The shipped `docker-compose.yml` runs OpenBao with **persistent file
-storage** and a wrapper script (`scripts/openbao/init.sh`) that
+The shipped `docker-compose.yml` runs OpenBao with **persistent integrated
+(raft) storage** and a wrapper script (`scripts/openbao/init.sh`) that
 auto-initialises and auto-unseals the container on every boot so it
 survives `docker compose down/up` without manual intervention.
 
 Two named Docker volumes underpin the setup:
 
-- `openbao-data` — the OpenBao file backend (`/openbao/data` inside
+- `openbao-data` — the OpenBao raft backend (`/openbao/data` inside
   the container). Holds every secret ever written.
 - `openbao-state` — `init.json` (Shamir unseal key + root token) plus
   a `root-token` file that aperium and the bootstrap container read
@@ -126,7 +126,7 @@ services:
       - -config=/openbao/config.hcl
     volumes:
       - ./openbao/config.hcl:/openbao/config.hcl:ro
-      - openbao-data:/openbao/file
+      - openbao-data:/openbao/data
     environment: []   # no -dev variables
 volumes:
   openbao-data:
@@ -135,7 +135,12 @@ volumes:
 With `config.hcl`:
 
 ```hcl
-storage "file" { path = "/openbao/file" }
+storage "raft" {
+  path    = "/openbao/data"
+  node_id = "openbao-1"
+}
+api_addr     = "http://openbao:8200"
+cluster_addr = "http://openbao:8201"
 listener "tcp" {
   address     = "0.0.0.0:8200"
   tls_disable = true   # put a reverse proxy in front; do NOT expose this raw

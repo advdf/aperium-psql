@@ -3,7 +3,7 @@
 # persistent OpenBao sidecar comes back online unattended after every restart.
 #
 # Layout under the openbao-data volume:
-#   /openbao/data/        ← OpenBao file storage (sealed raft equivalent)
+#   /openbao/data/        ← OpenBao integrated (raft) storage
 #   /openbao/state/init.json     ← unseal key + root token (written on first init)
 #   /openbao/state/.kv-enabled   ← marker that secret/ KV v2 mount is enabled
 #   /openbao/state/root-token    ← the root token alone, for the bootstrap + app
